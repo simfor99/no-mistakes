@@ -32,6 +32,8 @@ var (
 	superviseResume = resumeCodexSession
 	superviseWatch  = runWatchProcess
 	superviseSteps  = func(d *db.DB, runID string) ([]*db.StepResult, error) { return d.GetStepsByRun(runID) }
+	superviseSpawn  = spawnSupervisorWorker
+	superviseNotify = notifySupervisorUser
 )
 
 func newAxiSuperviseCmd() *cobra.Command {
@@ -185,12 +187,12 @@ func runAxiCodexHook(in io.Reader) error {
 		_ = store.Save(reg)
 		return nil
 	}
-	if run.AwaitingAgentSince != nil && (reg.Phase == supervision.PhaseHandoffInProgress || reg.Phase == supervision.PhaseAwaitingUser) {
+	if run.AwaitingAgentSince != nil {
 		firstUserHandoff := reg.Phase != supervision.PhaseAwaitingUser
 		reg.Phase = supervision.PhaseAwaitingUser
 		_ = store.Save(reg)
 		if firstUserHandoff {
-			notifySupervisorUser("No-Mistakes braucht eine Entscheidung", "Der Run wartet auf deine Antwort in Codex.")
+			superviseNotify("No-Mistakes braucht eine Entscheidung", "Der Run wartet auf deine Antwort in Codex.")
 		}
 		return nil
 	}
@@ -202,7 +204,7 @@ func runAxiCodexHook(in io.Reader) error {
 	if err != nil || !started {
 		return nil
 	}
-	if err := spawnSupervisorWorker(p.Root(), reg.CWD, reg.RunID); err != nil {
+	if err := superviseSpawn(p.Root(), reg.CWD, reg.RunID); err != nil {
 		_ = store.ReleaseWorker(reg.RunID)
 		reg.Phase, reg.Error = supervision.PhaseResumeFailed, "start worker: "+err.Error()
 		_ = store.Save(reg)
@@ -272,7 +274,7 @@ func runAxiSuperviseWorker(runID string) error {
 	if err := superviseResume(reg.CWD, reg.SessionID, runID); err != nil {
 		reg.Phase, reg.Error = supervision.PhaseResumeFailed, "resume Codex: "+err.Error()
 		_ = store.Save(reg)
-		notifySupervisorUser("No-Mistakes-Supervisor konnte Codex nicht fortsetzen", "Öffne den AXI-Status für die gespeicherte Diagnose.")
+		superviseNotify("No-Mistakes-Supervisor konnte Codex nicht fortsetzen", "Öffne den AXI-Status für die gespeicherte Diagnose.")
 	}
 	return nil
 }

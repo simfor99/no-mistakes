@@ -201,7 +201,7 @@ Merge this hook into your reviewed `~/.codex/hooks.json` configuration; do not r
 }
 ```
 
-On a matching Codex turn end, the hook claims only the armed run in the same working directory. A detached worker waits for an AXI event, resumes the same session once for each changed observed run state, and never answers a gate itself. A terminal run completes the registration. A run parked at a user decision, or a repeated unchanged attention state, is marked `awaiting_user` and does not resume until that same session has received Simon's answer and later ends again; then the hook attaches the next watch phase for the same run.
+On a matching Codex turn end, the hook claims only the armed run in the same working directory. A detached worker waits for an AXI event, resumes the same session once for each changed observed run state, and never answers a gate itself. A terminal run completes the registration. A run already parked at a user decision when it is armed, a later user-decision gate, or a repeated unchanged attention state is marked `awaiting_user` and does not resume until that same session has received Simon's answer and later ends again; then the hook attaches the next watch phase for the same run.
 
 The hook reads a Codex lifecycle event from standard input. It is a local trust boundary: review and trust it through Codex before use. The worker uses the installed `codex` executable and a saved session ID; a missing binary or failed resume is recorded as a local supervisor error and does not alter the pipeline.
 `axi supervise status --run <id>` reports that local phase and any stored error without exposing the saved Codex session ID.

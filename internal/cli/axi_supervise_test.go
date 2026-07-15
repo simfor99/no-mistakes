@@ -38,6 +38,82 @@ func TestCodexHookIgnoresMalformedPayload(t *testing.T) {
 	}
 }
 
+func TestCodexHookParksAlreadyAwaitingRunWithoutResuming(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	p := paths.WithRoot(nmHome)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error = %v", err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepoWithID("repo-1", t.TempDir(), "origin", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	dbRun, err := database.InsertRun(repo.ID, "feature/parked", "head", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	if err := database.SetRunAwaitingAgent(dbRun.ID); err != nil {
+		t.Fatalf("park run: %v", err)
+	}
+	cwd := t.TempDir()
+	store := supervision.NewStore(p.SupervisionDir())
+	if _, err := store.Arm(supervision.Registration{RunID: dbRun.ID, RepoID: repo.ID, CWD: cwd}); err != nil {
+		t.Fatalf("Arm() error = %v", err)
+	}
+
+	previousSpawn, previousNotify := superviseSpawn, superviseNotify
+	t.Cleanup(func() {
+		superviseSpawn = previousSpawn
+		superviseNotify = previousNotify
+	})
+	spawned, notified := 0, 0
+	superviseSpawn = func(string, string, string) error {
+		spawned++
+		return nil
+	}
+	superviseNotify = func(string, string) { notified++ }
+	event := `{"hook_event_name":"Stop","session_id":"session-1","cwd":"` + cwd + `"}`
+	if err := runAxiCodexHook(strings.NewReader(event)); err != nil {
+		t.Fatalf("runAxiCodexHook() error = %v", err)
+	}
+	reg, found, err := store.Get(dbRun.ID)
+	if err != nil || !found || reg.Phase != supervision.PhaseAwaitingUser || reg.SessionID != "session-1" {
+		t.Fatalf("Get() after parked stop = (%+v, %v, %v), want awaiting bound session", reg, found, err)
+	}
+	if spawned != 0 || notified != 1 {
+		t.Fatalf("parked stop spawned=%d notified=%d, want 0 and 1", spawned, notified)
+	}
+	if _, err := os.Stat(filepath.Join(p.SupervisionDir(), dbRun.ID+".worker.lock")); !os.IsNotExist(err) {
+		t.Fatalf("parked stop created worker marker: %v", err)
+	}
+
+	if err := database.ClearRunAwaitingAgent(dbRun.ID); err != nil {
+		t.Fatalf("clear parked run: %v", err)
+	}
+	if err := runAxiCodexHook(strings.NewReader(event)); err != nil {
+		t.Fatalf("runAxiCodexHook() after response error = %v", err)
+	}
+	if spawned != 1 {
+		t.Fatalf("later stop spawned=%d, want 1", spawned)
+	}
+	reg, found, err = store.Get(dbRun.ID)
+	if err != nil || !found || reg.Phase != supervision.PhaseWatching {
+		t.Fatalf("Get() after response = (%+v, %v, %v), want watching", reg, found, err)
+	}
+	if err := store.ReleaseWorker(dbRun.ID); err != nil {
+		t.Fatalf("release fake worker claim: %v", err)
+	}
+}
+
 func TestSupervisorEnvReplacesExistingNMHome(t *testing.T) {
 	t.Setenv("NM_HOME", "/old")
 	env := supervisorEnv("/new")
