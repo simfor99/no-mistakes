@@ -10,6 +10,7 @@ import (
 	"io"
 	"os/exec"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -336,6 +337,7 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 	}
 
 	checks := make([]scm.Check, 0)
+	observedRequired := map[string]bool{}
 	for _, native := range nativePages {
 		for _, run := range native.CheckRuns {
 			bucket := normalizeCheckBucket("", run.Status)
@@ -349,6 +351,9 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 				Name: run.Name, Bucket: bucket,
 				CompletedAt: parseGitHubTime(run.CompletedAt), Source: scm.CheckSourceNative, BlocksPending: true,
 			})
+			if run.Name != "" {
+				observedRequired[run.Name] = true
+			}
 		}
 	}
 	seen := map[string]bool{}
@@ -358,6 +363,7 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 				continue
 			}
 			seen[status.Context] = true // GitHub returns latest statuses first.
+			observedRequired[status.Context] = true
 			bucket := normalizeCheckBucket("", status.State)
 			blocksPending := true
 			if bucket == scm.CheckBucketPending && policyKnown && status.TargetURL == "" && !required[status.Context] {
@@ -369,7 +375,21 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 			})
 		}
 	}
-	if !policyKnown {
+	if policyKnown {
+		missingRequired := make([]string, 0)
+		for context := range required {
+			if !observedRequired[context] {
+				missingRequired = append(missingRequired, context)
+			}
+		}
+		sort.Strings(missingRequired)
+		for _, context := range missingRequired {
+			checks = append(checks, scm.Check{
+				Name: context, Bucket: scm.CheckBucketPending,
+				Source: scm.CheckSourceUnknown, BlocksPending: true,
+			})
+		}
+	} else {
 		// A required workflow can exist before GitHub has emitted its first
 		// check run. Keep CI conservatively pending rather than treating an
 		// unreadable or unresolvable requirement policy as "no checks passed".

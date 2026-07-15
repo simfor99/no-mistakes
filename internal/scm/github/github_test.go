@@ -264,6 +264,46 @@ func TestGetChecksKeepsProtectedOrLinkedLegacyPendingBlocking(t *testing.T) {
 	}
 }
 
+func TestGetChecksAddsMissingRequiredContextAsBlockingPending(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		checkRuns   string
+		wantChecks  int
+		wantPending bool
+	}{
+		{
+			name:        "missing required context",
+			checkRuns:   `{"check_runs":[]}`,
+			wantChecks:  1,
+			wantPending: true,
+		},
+		{
+			name:        "native check already present",
+			checkRuns:   `{"check_runs":[{"name":"verify","status":"completed","conclusion":"success"}]}`,
+			wantChecks:  1,
+			wantPending: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh api repos/test/repo/branches/main/protection/required_status_checks": {stdout: `{"contexts":["verify"]}` + "\n"},
+				"gh api --paginate repos/test/repo/rules/branches/main":                  {stdout: "[]\n"},
+				"gh api --paginate repos/test/repo/commits/abc/check-runs?per_page=100":  {stdout: tc.checkRuns + "\n"},
+				"gh api --paginate repos/test/repo/commits/abc/statuses?per_page=100":    {stdout: "[]\n"},
+			}), nil, "", "test/repo")
+
+			checks, err := host.GetChecks(context.Background(), &scm.PR{HeadSHA: "abc", BaseBranch: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(checks) != tc.wantChecks || checks[0].Name != "verify" || checks[0].Pending() != tc.wantPending || !checks[0].BlocksPending {
+				t.Fatalf("checks = %+v, want %d verify checks with pending=%t", checks, tc.wantChecks, tc.wantPending)
+			}
+		})
+	}
+}
+
 func TestGetChecksFailsClosedWhenProtectionCannotBeRead(t *testing.T) {
 	t.Parallel()
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{

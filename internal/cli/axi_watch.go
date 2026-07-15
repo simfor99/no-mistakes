@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -106,22 +107,20 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) error {
 		return emitError(cmd, 1, fmt.Sprintf("subscribe run: %v", err))
 	}
 	defer cancel()
-	quietLatched := false
+	attentionLatched := false
 	for {
 		run, err := read()
 		if err != nil {
 			return emitError(cmd, 1, fmt.Sprintf("read run: %v", err))
 		}
 		if done, reason := watchReason(run, cfg.StepQuietWarning, ciLogReader(p)); done {
-			if reason == "terminal" || until == watchUntilAttention {
+			if !latchWatchAttention(until, reason) {
 				return renderWatchResult(cmd, runViewFromIPC(run), reason)
 			}
-			if reason == "quiet" {
-				quietLatched = true
-			}
+			attentionLatched = true
 		}
 		var timer <-chan time.Time
-		if !quietLatched {
+		if !attentionLatched {
 			if delay := watchQuietDelay(runViewFromIPC(run), cfg.StepQuietWarning); delay >= 0 {
 				timer = time.After(delay)
 			}
@@ -131,19 +130,30 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) error {
 			return renderWatchInterrupted(cmd)
 		case _, ok := <-events:
 			if !ok {
-				final, e := read()
-				if e != nil {
-					return emitError(cmd, 1, fmt.Sprintf("reconcile closed stream: %v", e))
-				}
-				if terminalStatus(string(final.Status)) {
-					return renderWatchResult(cmd, runViewFromIPC(final), "terminal")
-				}
-				return renderWatchInterruptedStream(cmd, runViewFromIPC(final))
+				return reconcileClosedWatchStream(cmd, ctx, read)
 			}
-			quietLatched = false
+			attentionLatched = false
 		case <-timer:
 		}
 	}
+}
+
+func latchWatchAttention(until watchUntil, reason string) bool {
+	return until == watchUntilTerminal && reason != "terminal"
+}
+
+func reconcileClosedWatchStream(cmd *cobra.Command, ctx context.Context, read func() (*ipc.RunInfo, error)) error {
+	if ctx.Err() != nil {
+		return renderWatchInterrupted(cmd)
+	}
+	final, err := read()
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("reconcile closed stream: %v", err))
+	}
+	if terminalStatus(string(final.Status)) {
+		return renderWatchResult(cmd, runViewFromIPC(final), "terminal")
+	}
+	return renderWatchInterruptedStream(cmd, runViewFromIPC(final))
 }
 
 func watchReason(run *ipc.RunInfo, quiet time.Duration, logs func(string) []string) (bool, string) {

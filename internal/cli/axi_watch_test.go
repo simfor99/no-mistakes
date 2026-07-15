@@ -2,12 +2,57 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
+
+func TestLatchWatchAttention(t *testing.T) {
+	for _, tc := range []struct {
+		until  watchUntil
+		reason string
+		want   bool
+	}{
+		{watchUntilAttention, "checks-passed", false},
+		{watchUntilTerminal, "checks-passed", true},
+		{watchUntilTerminal, "gate", true},
+		{watchUntilTerminal, "quiet", true},
+		{watchUntilTerminal, "terminal", false},
+	} {
+		if got := latchWatchAttention(tc.until, tc.reason); got != tc.want {
+			t.Errorf("latchWatchAttention(%q, %q) = %t, want %t", tc.until, tc.reason, got, tc.want)
+		}
+	}
+}
+
+func TestReconcileClosedWatchStreamPrefersSignalInterrupt(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	called := false
+
+	err := reconcileClosedWatchStream(cmd, ctx, func() (*ipc.RunInfo, error) {
+		called = true
+		return nil, errors.New("must not read")
+	})
+	if called {
+		t.Fatal("reconcile read after signal cancellation")
+	}
+	var exit *exitError
+	if !errors.As(err, &exit) || exit.code != 130 {
+		t.Fatalf("reconcileClosedWatchStream() error = %v, want exit 130", err)
+	}
+	if !strings.Contains(out.String(), "stop: interrupted") {
+		t.Fatalf("watch output = %q, want interrupted result", out.String())
+	}
+}
 
 func TestRenderWatchResultUsesChecksPassedAsCanonicalHandoff(t *testing.T) {
 	cmd := &cobra.Command{}
