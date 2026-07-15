@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 )
@@ -268,4 +270,44 @@ func TestCallWithNilResult(t *testing.T) {
 	if err := c.Call("noop", nil, nil); err != nil {
 		t.Fatalf("call with nil result: %v", err)
 	}
+}
+
+func TestCallContextCancelsBlockedRead(t *testing.T) {
+	sock := socketPath(t)
+	srv := startServer(t, sock)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv.Handle("block", func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		close(started)
+		<-release
+		return map[string]bool{"ok": true}, nil
+	})
+
+	c, err := ipc.Dial(sock)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		var response json.RawMessage
+		result <- c.CallContext(ctx, "block", nil, &response)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("server did not receive request")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("CallContext() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CallContext did not return after cancellation")
+	}
+	close(release)
 }

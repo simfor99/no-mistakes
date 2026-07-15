@@ -163,9 +163,15 @@ func (s *Server) handleConn(conn net.Conn) {
 			send := func(event interface{}) error {
 				return encoder.Encode(event)
 			}
-			if err := streamHandler(ctx, req.Params, send); err != nil {
+			streamCtx, cancelStream := context.WithCancel(ctx)
+			go func() {
+				scanner.Scan()
+				cancelStream()
+			}()
+			if err := streamHandler(streamCtx, req.Params, send); err != nil {
 				slog.Debug("stream handler ended", "method", req.Method, "error", err)
 			}
+			cancelStream()
 			return // connection done after streaming
 		}
 

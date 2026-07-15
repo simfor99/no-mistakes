@@ -116,8 +116,20 @@ func (c *Client) Call(method string, params interface{}, result interface{}) err
 	return c.CallWithTimeout(method, params, result, defaultCallTimeout)
 }
 
+// CallContext sends a JSON-RPC request and stops waiting when ctx is canceled.
+func (c *Client) CallContext(ctx context.Context, method string, params interface{}, result interface{}) error {
+	return c.call(ctx, method, params, result, defaultCallTimeout)
+}
+
 // CallWithTimeout is Call with a caller-selected read deadline.
 func (c *Client) CallWithTimeout(method string, params interface{}, result interface{}, timeout time.Duration) error {
+	return c.call(context.Background(), method, params, result, timeout)
+}
+
+func (c *Client) call(ctx context.Context, method string, params interface{}, result interface{}, timeout time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -133,10 +145,27 @@ func (c *Client) CallWithTimeout(method string, params interface{}, result inter
 	if timeout <= 0 {
 		timeout = defaultCallTimeout
 	}
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		select {
+		case <-ctx.Done():
+			_ = c.conn.SetReadDeadline(time.Now())
+		case <-stop:
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-stopped
+		_ = c.conn.SetReadDeadline(time.Time{})
+	}()
 	c.conn.SetReadDeadline(time.Now().Add(timeout))
-	defer c.conn.SetReadDeadline(time.Time{})
 
 	if !c.scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := c.scanner.Err(); err != nil {
 			return fmt.Errorf("read response: %w", err)
 		}

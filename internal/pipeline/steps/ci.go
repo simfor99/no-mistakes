@@ -280,7 +280,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				headReconciled = true
 			}
 		}
-		if headDrifted {
+		if receipt == prHeadReceiptUnknown || headDrifted {
 			timeoutFailingChecks = timeoutFailingChecks[:0]
 			timeoutMergeConflict = false
 			mergeabilityBlockedReason = ""
@@ -293,7 +293,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			headDriftLogged = false
 		}
 
-		if !headDrifted {
+		if receipt != prHeadReceiptUnknown && !headDrifted {
 
 			// Check mergeable state if the provider supports it
 			mergeConflict := false

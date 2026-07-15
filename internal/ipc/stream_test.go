@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 )
@@ -129,6 +130,43 @@ func TestStreamRequestsLogAtInfo(t *testing.T) {
 	logOutput := logs.String()
 	if !strings.Contains(logOutput, "msg=\"ipc stream request\" method=stream_test") {
 		t.Fatalf("stream request log missing: %s", logOutput)
+	}
+}
+
+func TestStreamHandlerContextCancelsOnClientDisconnect(t *testing.T) {
+	sock := socketPath(t)
+	srv := startServer(t, sock)
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	srv.HandleStream("stream_test", func(ctx context.Context, _ json.RawMessage, _ func(interface{}) error) error {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	})
+
+	conn := rawDial(t, sock)
+	encoder := json.NewEncoder(conn)
+	scanner := bufio.NewScanner(conn)
+	req, _ := ipc.NewRequest("stream_test", nil)
+	if err := encoder.Encode(req); err != nil {
+		t.Fatalf("send request: %v", err)
+	}
+	if !scanner.Scan() {
+		t.Fatal("no initial response")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("stream handler did not start")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close client connection: %v", err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("stream handler context was not canceled after client disconnect")
 	}
 }
 

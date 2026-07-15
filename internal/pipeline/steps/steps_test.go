@@ -40,6 +40,10 @@ func handleFakeCLI(mode string) {
 	}
 	logFakeCLIStdinBody(args, logFile)
 	if strings.HasPrefix(mode, "ci-gh") && isFakeCIGHHeadRequest(args) {
+		if headErr := os.Getenv("FAKE_CLI_LIVE_HEAD_ERR"); headErr != "" {
+			fmt.Fprintln(os.Stderr, headErr)
+			os.Exit(1)
+		}
 		fmt.Println(fakeCIGHLiveHead())
 		return
 	}

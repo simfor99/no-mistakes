@@ -103,8 +103,11 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) error {
 	}
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	read := func() (*ipc.RunInfo, error) { return getRunInfo(client, runID) }
+	read := func() (*ipc.RunInfo, error) { return getRunInfoContext(ctx, client, runID) }
 	if run, err := read(); err != nil {
+		if ctx.Err() != nil {
+			return renderWatchInterrupted(cmd)
+		}
 		return emitError(cmd, 1, fmt.Sprintf("read run: %v", err))
 	} else if done, reason := watchReason(run, cfg.StepQuietWarning, ciLogReader(p)); done && until == watchUntilAttention {
 		return renderWatchResult(cmd, runViewFromIPC(run), reason)
@@ -121,6 +124,9 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) error {
 	for {
 		run, err := read()
 		if err != nil {
+			if ctx.Err() != nil {
+				return renderWatchInterrupted(cmd)
+			}
 			return emitError(cmd, 1, fmt.Sprintf("read run: %v", err))
 		}
 		if done, reason := watchReason(run, cfg.StepQuietWarning, ciLogReader(p)); done {

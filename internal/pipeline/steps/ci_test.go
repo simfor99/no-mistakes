@@ -423,6 +423,40 @@ func TestCIStep_LivePRHeadDriftSuppressesChecksPassed(t *testing.T) {
 	}
 }
 
+func TestCIStep_UnknownPRHeadReceiptSkipsChecks(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	logFile := filepath.Join(t.TempDir(), "gh.log")
+	env := append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`),
+		"FAKE_CLI_LIVE_HEAD_ERR=temporary head lookup failure",
+		"FAKE_CLI_LOG="+logFile,
+	)
+
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 10 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{waitForNextPoll: func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}}
+	if _, err := step.Execute(sctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+	invocations, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read gh invocations: %v", err)
+	}
+	if strings.Contains(string(invocations), "check-runs") || strings.Contains(string(invocations), "pr checks") {
+		t.Fatalf("unknown PR head receipt must not fetch checks: %s", invocations)
+	}
+}
+
 func TestCIStep_LivePRHeadDriftSuppressesNoChecksPassed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

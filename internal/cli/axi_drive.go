@@ -479,8 +479,12 @@ func waitStepLeavesGate(ctx context.Context, client *ipc.Client, runID, step, ga
 }
 
 func getRunInfo(client *ipc.Client, runID string) (*ipc.RunInfo, error) {
+	return getRunInfoContext(context.Background(), client, runID)
+}
+
+func getRunInfoContext(ctx context.Context, client *ipc.Client, runID string) (*ipc.RunInfo, error) {
 	var result ipc.GetRunResult
-	if err := client.Call(ipc.MethodGetRun, &ipc.GetRunParams{RunID: runID}, &result); err != nil {
+	if err := client.CallContext(ctx, ipc.MethodGetRun, &ipc.GetRunParams{RunID: runID}, &result); err != nil {
 		return nil, err
 	}
 	return result.Run, nil
