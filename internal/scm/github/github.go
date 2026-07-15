@@ -320,14 +320,12 @@ func (h *Host) getChecksFromPR(ctx context.Context, pr *scm.PR) ([]scm.Check, er
 				completedAt = parsed
 			}
 		}
-		checks = append(checks, scm.Check{Name: r.Name, Bucket: normalizeCheckBucket(r.Bucket, r.State), CompletedAt: completedAt, Source: scm.CheckSourceUnknown, BlocksPending: true})
+		checks = append(checks, scm.Check{Name: r.Name, Bucket: normalizeCheckBucket(r.Bucket, r.State), CompletedAt: completedAt})
 	}
 	return checks, nil
 }
 
-// getChecksWithProvenance keeps native Check Runs and legacy commit statuses
-// separate. A linkless legacy pending status is advisory only after GitHub's
-// active protection rules positively show that its context is not required.
+// getChecksWithProvenance reads native Check Runs and legacy commit statuses.
 func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	repo := githubAPIRepo(h.repo)
 	required, policyKnown := h.requiredStatusContexts(ctx, repo, pr.BaseBranch)
@@ -350,7 +348,6 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 	var legacyPages [][]struct {
 		Context   string `json:"context"`
 		State     string `json:"state"`
-		TargetURL string `json:"target_url"`
 		CreatedAt string `json:"created_at"`
 	}
 	if err := h.apiJSONPages(ctx, "repos/"+repo+"/commits/"+pr.HeadSHA+"/statuses?per_page=100", &legacyPages); err != nil {
@@ -368,10 +365,7 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 					bucket = scm.CheckBucketPending
 				}
 			}
-			checks = append(checks, scm.Check{
-				Name: run.Name, Bucket: bucket,
-				CompletedAt: parseGitHubTime(run.CompletedAt), Source: scm.CheckSourceNative, BlocksPending: true,
-			})
+			checks = append(checks, scm.Check{Name: run.Name, Bucket: bucket, CompletedAt: parseGitHubTime(run.CompletedAt)})
 			for requirement := range required {
 				if requirement.Context == run.Name && (!requirement.AppBound || requirement.AppID == run.App.ID) {
 					observedRequired[requirement] = true
@@ -392,14 +386,7 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 				}
 			}
 			bucket := normalizeCheckBucket("", status.State)
-			blocksPending := true
-			if bucket == scm.CheckBucketPending && policyKnown && status.TargetURL == "" && !hasRequiredContext(required, status.Context) {
-				blocksPending = false
-			}
-			checks = append(checks, scm.Check{
-				Name: status.Context, Bucket: bucket, CompletedAt: parseGitHubTime(status.CreatedAt),
-				Source: scm.CheckSourceLegacy, BlocksPending: blocksPending,
-			})
+			checks = append(checks, scm.Check{Name: status.Context, Bucket: bucket, CompletedAt: parseGitHubTime(status.CreatedAt)})
 		}
 	}
 	if policyKnown {
@@ -419,19 +406,13 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 			return missingRequired[i].AppID < missingRequired[j].AppID
 		})
 		for _, requirement := range missingRequired {
-			checks = append(checks, scm.Check{
-				Name: requiredStatusCheckName(requirement), Bucket: scm.CheckBucketPending,
-				Source: scm.CheckSourceUnknown, BlocksPending: true,
-			})
+			checks = append(checks, scm.Check{Name: requiredStatusCheckName(requirement), Bucket: scm.CheckBucketPending})
 		}
 	} else {
 		// A required workflow can exist before GitHub has emitted its first
 		// check run. Keep CI conservatively pending rather than treating an
 		// unreadable or unresolvable requirement policy as "no checks passed".
-		checks = append(checks, scm.Check{
-			Name: "GitHub required-check policy unresolved", Bucket: scm.CheckBucketPending,
-			Source: scm.CheckSourceUnknown, BlocksPending: true,
-		})
+		checks = append(checks, scm.Check{Name: "GitHub required-check policy unresolved", Bucket: scm.CheckBucketPending})
 	}
 	return checks, nil
 }
@@ -510,15 +491,6 @@ func requiredStatusCheckName(check requiredStatusCheck) string {
 		return check.Context
 	}
 	return fmt.Sprintf("%s (GitHub App %d)", check.Context, check.AppID)
-}
-
-func hasRequiredContext(required map[requiredStatusCheck]bool, context string) bool {
-	for check := range required {
-		if check.Context == context {
-			return true
-		}
-	}
-	return false
 }
 
 func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) (map[requiredStatusCheck]bool, bool) {

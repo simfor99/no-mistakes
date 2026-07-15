@@ -231,7 +231,7 @@ func TestGetChecksParsesCompletedAt(t *testing.T) {
 	}
 }
 
-func TestGetChecksMarksOnlyUnprotectedLinklessLegacyPendingAsAdvisory(t *testing.T) {
+func TestGetChecksKeepsUnprotectedLinklessLegacyPendingBlocking(t *testing.T) {
 	t.Parallel()
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh api repos/test/repo/branches/main/protection/required_status_checks": {stderr: "Branch not protected", code: 1},
@@ -247,11 +247,8 @@ func TestGetChecksMarksOnlyUnprotectedLinklessLegacyPendingAsAdvisory(t *testing
 	if len(checks) != 2 {
 		t.Fatalf("checks = %+v, want native + legacy", checks)
 	}
-	if checks[0].Source != scm.CheckSourceNative || !checks[0].BlocksPending {
-		t.Fatalf("native check = %+v, want blocking native provenance", checks[0])
-	}
-	if checks[1].Source != scm.CheckSourceLegacy || checks[1].BlocksPending || checks[1].Pending() {
-		t.Fatalf("ghost legacy check = %+v, want non-blocking advisory", checks[1])
+	if checks[1].Name != "CodeRabbit" || !checks[1].Pending() {
+		t.Fatalf("legacy check = %+v, want blocking pending status", checks[1])
 	}
 }
 
@@ -272,7 +269,7 @@ func TestGetChecksKeepsProtectedOrLinkedLegacyPendingBlocking(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(checks) != 1 || !checks[0].BlocksPending || !checks[0].Pending() {
+			if len(checks) != 1 || !checks[0].Pending() {
 				t.Fatalf("checks = %+v, want blocking legacy pending", checks)
 			}
 		})
@@ -312,7 +309,7 @@ func TestGetChecksAddsMissingRequiredContextAsBlockingPending(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(checks) != tc.wantChecks || checks[0].Name != "verify" || checks[0].Pending() != tc.wantPending || !checks[0].BlocksPending {
+			if len(checks) != tc.wantChecks || checks[0].Name != "verify" || checks[0].Pending() != tc.wantPending {
 				t.Fatalf("checks = %+v, want %d verify checks with pending=%t", checks, tc.wantChecks, tc.wantPending)
 			}
 		})
@@ -408,7 +405,7 @@ func TestGetChecksFailsClosedWhenProtectionCannotBeRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(checks) != 1 || !checks[0].BlocksPending || !checks[0].Pending() {
+	if len(checks) != 1 || !checks[0].Pending() {
 		t.Fatalf("checks = %+v, want fail-closed blocking legacy pending", checks)
 	}
 }
@@ -425,7 +422,7 @@ func TestGetChecksFailsClosedWhenProtectionReturnsArbitrary404(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(checks) != 1 || !checks[0].BlocksPending || !checks[0].Pending() {
+	if len(checks) != 1 || !checks[0].Pending() {
 		t.Fatalf("checks = %+v, want fail-closed blocking policy check", checks)
 	}
 }
@@ -480,7 +477,7 @@ func TestGetChecksReadsEveryPaginatedBranchRulePage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(checks) != 1 || checks[0].Name != "CodeRabbit" || !checks[0].BlocksPending || !checks[0].Pending() {
+	if len(checks) != 1 || checks[0].Name != "CodeRabbit" || !checks[0].Pending() {
 		t.Fatalf("checks = %+v, want late-page required legacy pending check", checks)
 	}
 }

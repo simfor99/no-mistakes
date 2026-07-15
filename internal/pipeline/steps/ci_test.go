@@ -479,7 +479,7 @@ func TestCIStep_LivePRHeadDriftSkipsAutoFix(t *testing.T) {
 	}
 }
 
-func TestCIStep_UnprotectedLinklessLegacyPendingReportsChecksPassed(t *testing.T) {
+func TestCIStep_UnprotectedLinklessLegacyPendingKeepsMonitoring(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -505,15 +505,18 @@ func TestCIStep_UnprotectedLinklessLegacyPendingReportsChecksPassed(t *testing.T
 	if _, err := step.Execute(sctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected monitoring to continue after reporting readiness, got %v", err)
 	}
-	if !cimonitor.ChecksPassed(logs) {
-		t.Fatalf("expected the monitor to report checks passed, got logs: %v", logs)
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("pending legacy CI must not report checks passed, got logs: %v", logs)
 	}
+	running := false
 	for _, log := range logs {
 		if log == ciChecksRunningMsg {
-			t.Fatalf("advisory legacy status must not report checks still running: %v", logs)
+			running = true
 		}
 	}
-	t.Logf("CI monitor output: %s", cimonitor.ParseActivity(logs).LastEvent)
+	if !running {
+		t.Fatalf("pending legacy CI must keep monitoring, got logs: %v", logs)
+	}
 }
 
 func TestCIStep_CIWarningAllowsChecksPassedToBeReannounced(t *testing.T) {
