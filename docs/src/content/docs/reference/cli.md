@@ -105,7 +105,7 @@ Without `--yes`, an agent driving `axi run` should stop when a gate contains `ac
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
-When the CI step is still monitoring an open PR and checks are green, `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge.
+When the CI step is still monitoring an open PR and checks are green, `axi run` exits successfully with `outcome: checks-passed` only when a live PR-head receipt matches the stored run `head_sha`; providers without live-head provenance retain the human CI success display but do not emit that agent handoff.
 If the calling workflow explicitly confirms merge authority, keep the active agent turn open, perform external review triage, and verify a fresh exact-head receipt before invoking that workflow's authorized merge contract. Green CI alone never grants merge authority. Otherwise report that the PR is ready and ask the user to decide whether to merge.
 If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
 The monitor auto-rebases onto the base, resolves actual conflicts, and re-pushes the branch; a PR that is merely behind but clean needs no command.
@@ -133,7 +133,7 @@ no-mistakes axi respond --action skip
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve every subsequent gate until a decision point or outcome |
 
-After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix` and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` when CI is green but the PR still needs a human merge.
+After the explicit response, `--yes` uses the same auto-resolution behavior as `axi run --yes`: have the pipeline fix `auto-fix` and `ask-user` findings once, approve the fix review, approve gates that only contain non-actionable `no-op` findings, and stop at `outcome: checks-passed` only when CI is green and a live PR-head receipt matches the stored run `head_sha`; providers without live-head provenance retain the human CI success display but do not emit that agent handoff.
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome.
 If it returns another `gate:`, answer that gate; do not idle-wait for the run to move forward by itself.
 When the daemon is already running, `axi respond` can continue an active run even if the global config file has become invalid, because it is not starting a fresh run.
@@ -153,7 +153,7 @@ no-mistakes axi watch --run <id> --until terminal
 | `--run` | `string` | (none) | Run ID to watch; required |
 | `--until` | `string` | `attention` | `attention` stops at a gate, quiet signal, terminal result, or `checks-passed`; `terminal` keeps waiting through quiet signals |
 
-For `--until attention`, only a CI-ready handoff returns the top-level `outcome: checks-passed`. Gate and quiet stops are attention signals, never merge authority. A terminal stop preserves the terminal outcome and any recorded error. `head_sha` is the full stored run SHA; use it with fresh GitHub and local Git values for an exact-head receipt, not as authority to merge.
+For `--until attention`, only a CI-ready handoff with a live PR-head receipt matching the stored run `head_sha` returns the top-level `outcome: checks-passed`. Gate and quiet stops are attention signals, never merge authority. A terminal stop preserves the terminal outcome and any recorded error. `head_sha` is the full stored run SHA; use it with fresh GitHub and local Git values for an exact-head receipt, not as authority to merge.
 
 ## no-mistakes axi status
 

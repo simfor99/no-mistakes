@@ -39,6 +39,12 @@ var canonicalChecksPassedHandoffPhrases = []string{
 	"external review triage",
 }
 
+var canonicalChecksPassedReceiptPhrases = []string{
+	"live PR-head receipt matches",
+	"stored run `head_sha`",
+	"without live-head provenance",
+}
+
 func TestChecksPassedHandoffGuidance_SyncedAcrossSurfaces(t *testing.T) {
 	surfaces := map[string]string{
 		"skill body":      skill.Markdown(),
@@ -50,6 +56,22 @@ func TestChecksPassedHandoffGuidance_SyncedAcrossSurfaces(t *testing.T) {
 		for _, phrase := range canonicalChecksPassedHandoffPhrases {
 			if !strings.Contains(content, phrase) {
 				t.Errorf("%s is missing the canonical checks-passed handoff phrase %q", name, phrase)
+			}
+		}
+	}
+}
+
+func TestChecksPassedReceiptGuidance_SyncedAcrossSurfaces(t *testing.T) {
+	surfaces := map[string]string{
+		"skill body":    skill.Markdown(),
+		"agents guide":  readAgentsGuide(t),
+		"CLI reference": readCLIReference(t),
+		"gate model":    readGateModel(t),
+	}
+	for name, content := range surfaces {
+		for _, phrase := range canonicalChecksPassedReceiptPhrases {
+			if !strings.Contains(content, phrase) {
+				t.Errorf("%s is missing the canonical checks-passed receipt phrase %q", name, phrase)
 			}
 		}
 	}
@@ -218,6 +240,16 @@ func readCLIReference(t *testing.T) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read CLI reference %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func readGateModel(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "docs", "src", "content", "docs", "concepts", "gate-model.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read gate model %s: %v", path, err)
 	}
 	return string(data)
 }

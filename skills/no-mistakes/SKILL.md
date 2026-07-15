@@ -195,9 +195,10 @@ Never abort-and-restart, reset the branch, or open a new branch in a way that dr
 re-validates the branch's current state, so those commits stay on the branch
 and already-resolved findings do not re-surface.
 
-The CI step deliberately keeps watching the PR after checks pass, so
-`axi run` returns `checks-passed` the moment checks are green rather than
-blocking on the human merge. Never poll or re-run waiting for the merge yourself.
+The CI step deliberately keeps watching the PR after checks pass. `axi run` returns
+`checks-passed` only when a live PR-head receipt matches the stored run `head_sha`;
+providers without live-head provenance keep the human CI success display but do
+not emit that agent handoff. Never poll or re-run waiting for the merge yourself.
 
 Because that monitor stays live, a PR that falls behind the default branch or
 hits a merge conflict after checks pass - commonly because another PR merged
