@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 )
 
@@ -46,18 +47,21 @@ func TestCIStep_GitLabPassesWithoutHandoffProvenance(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected passing GitLab CI to keep monitoring while MR is open, got %v", err)
 	}
-	foundRunning := false
+	foundHumanSuccess := false
 	for _, line := range logs {
 		if line == ciChecksPassedMsg || line == ciNoChecksPassedMsg {
 			t.Fatalf("GitLab without head provenance must not emit a handoff: %v", logs)
 		}
-		if line == ciChecksRunningMsg {
-			foundRunning = true
+		if line == ciChecksPassedWithoutReceiptMsg {
+			foundHumanSuccess = true
 			break
 		}
 	}
-	if !foundRunning {
-		t.Fatalf("expected continued-monitoring status, got: %v", logs)
+	if !foundHumanSuccess {
+		t.Fatalf("expected human CI success status, got: %v", logs)
+	}
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("GitLab without head provenance must not emit an agent handoff: %v", logs)
 	}
 }
 
@@ -284,17 +288,20 @@ func TestCIStep_GitLabPendingChecksKeepMonitoringWhenDone(t *testing.T) {
 	if pollCount != 2 {
 		t.Fatalf("expected one pending wait plus one healthy monitoring wait, got %d", pollCount)
 	}
-	foundRunning := false
+	foundHumanSuccess := false
 	for _, line := range logs {
 		if line == ciChecksPassedMsg || line == ciNoChecksPassedMsg {
 			t.Fatalf("GitLab without head provenance must not emit a handoff: %v", logs)
 		}
-		if line == ciChecksRunningMsg {
-			foundRunning = true
+		if line == ciChecksPassedWithoutReceiptMsg {
+			foundHumanSuccess = true
 			break
 		}
 	}
-	if !foundRunning {
-		t.Fatalf("expected continued-monitoring status, got: %v", logs)
+	if !foundHumanSuccess {
+		t.Fatalf("expected human CI success status, got: %v", logs)
+	}
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("GitLab without head provenance must not emit an agent handoff: %v", logs)
 	}
 }

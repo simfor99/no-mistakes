@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/bitbucket"
+	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -52,7 +53,7 @@ func TestCIStep_BitbucketPassesWithoutHandoffProvenance(t *testing.T) {
 	if api.statusesCalls == 0 {
 		t.Fatal("expected Bitbucket statuses endpoint to be called")
 	}
-	foundRunning := false
+	foundHumanSuccess := false
 	for _, line := range logs {
 		if strings.Contains(line, "ready to merge") {
 			t.Fatalf("expected Bitbucket CI logs not to imply mergeability, got %v", logs)
@@ -60,12 +61,15 @@ func TestCIStep_BitbucketPassesWithoutHandoffProvenance(t *testing.T) {
 		if line == ciChecksPassedMsg || line == ciNoChecksPassedMsg {
 			t.Fatalf("Bitbucket without head provenance must not emit a handoff: %v", logs)
 		}
-		if line == ciChecksRunningMsg {
-			foundRunning = true
+		if line == ciChecksPassedWithoutReceiptMsg {
+			foundHumanSuccess = true
 		}
 	}
-	if !foundRunning {
-		t.Fatalf("expected continued-monitoring status, got %v", logs)
+	if !foundHumanSuccess {
+		t.Fatalf("expected human CI success status, got %v", logs)
+	}
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("Bitbucket without head provenance must not emit an agent handoff: %v", logs)
 	}
 }
 

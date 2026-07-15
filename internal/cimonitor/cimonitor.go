@@ -4,8 +4,8 @@
 // The CI step (internal/pipeline/steps) emits these exact log lines while it
 // watches an open PR. Two very different consumers read them back: the TUI
 // renders a live CI panel, and the agent-facing `axi` commands decide when to
-// hand control back to the agent. Keeping the strings and the parser here means
-// both consumers interpret a run identically and cannot drift apart.
+// hand control back to the agent. Keeping the strings and parser here keeps
+// their respective monitoring state consistent.
 package cimonitor
 
 import "strings"
@@ -24,15 +24,18 @@ const (
 	NoChecksPassedMsg = "no CI checks reported - still monitoring until merged or closed"
 	// ChecksRunningMsg is logged when checks are (re-)running with no failures
 	// yet, which clears any previous passed-checks state.
-	ChecksRunningMsg = "CI checks running, waiting for results..."
+	ChecksRunningMsg                = "CI checks running, waiting for results..."
+	ChecksPassedWithoutReceiptMsg   = "all CI checks passed - still monitoring until merged or closed (exact head receipt unavailable)"
+	NoChecksPassedWithoutReceiptMsg = "no CI checks reported - still monitoring until merged or closed (exact head receipt unavailable)"
 )
 
 // Activity summarizes what the CI step has been doing, derived from its logs.
 type Activity struct {
-	CIFixes    int    // number of auto-fix attempts observed
-	AutoFixing bool   // an auto-fix is currently in progress
-	Ready      bool   // checks have passed; the PR is ready for a human to merge
-	LastEvent  string // the most recent recognized log line
+	CIFixes      int  // number of auto-fix attempts observed
+	AutoFixing   bool // an auto-fix is currently in progress
+	Ready        bool // checks have passed; the PR is ready for a human to merge
+	HandoffReady bool
+	LastEvent    string // the most recent recognized log line
 }
 
 // ParseActivity extracts structured activity from CI log messages.
@@ -50,18 +53,27 @@ func ParseActivity(logs []string) Activity {
 			a.CIFixes++
 			a.AutoFixing = true
 			a.Ready = false
+			a.HandoffReady = false
 			a.LastEvent = line
 		case strings.Contains(line, "committed and pushed fixes"):
 			a.AutoFixing = false
 			a.Ready = false
+			a.HandoffReady = false
 			a.LastEvent = line
 		case strings.Contains(line, "CI failures detected"):
 			a.AutoFixing = true
 			a.Ready = false
+			a.HandoffReady = false
 			a.LastEvent = line
 		case line == ChecksPassedMsg || line == NoChecksPassedMsg:
 			a.AutoFixing = false
 			a.Ready = true
+			a.HandoffReady = true
+			a.LastEvent = line
+		case line == ChecksPassedWithoutReceiptMsg || line == NoChecksPassedWithoutReceiptMsg:
+			a.AutoFixing = false
+			a.Ready = true
+			a.HandoffReady = false
 			a.LastEvent = line
 		case strings.Contains(line, "issues detected"),
 			strings.Contains(line, "CI checks running"),
@@ -71,18 +83,23 @@ func ParseActivity(logs []string) Activity {
 			strings.Contains(line, "warning: could not check PR state"):
 			a.AutoFixing = false
 			a.Ready = false
+			a.HandoffReady = false
 			a.LastEvent = line
 		case strings.Contains(line, "monitoring CI for PR"):
 			a.Ready = false
+			a.HandoffReady = false
 			a.LastEvent = line
 		case strings.Contains(line, "PR has been merged"):
 			a.Ready = false
+			a.HandoffReady = false
 			a.LastEvent = line
 		case strings.Contains(line, "PR has been closed"):
 			a.Ready = false
+			a.HandoffReady = false
 			a.LastEvent = line
 		case strings.Contains(line, "CI timeout"):
 			a.Ready = false
+			a.HandoffReady = false
 			a.LastEvent = line
 		}
 	}
@@ -90,7 +107,7 @@ func ParseActivity(logs []string) Activity {
 }
 
 // ChecksPassed reports whether the CI monitor's latest state is "checks passed,
-// PR ready to merge". It is the agent-facing summary of ParseActivity(logs).Ready.
+// PR ready to merge". It is the agent-facing summary of ParseActivity(logs).HandoffReady.
 func ChecksPassed(logs []string) bool {
-	return ParseActivity(logs).Ready
+	return ParseActivity(logs).HandoffReady
 }

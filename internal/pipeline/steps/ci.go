@@ -24,9 +24,11 @@ const (
 // checks that are still running. The canonical strings live in cimonitor so all
 // producers and consumers agree on them.
 const (
-	ciChecksPassedMsg   = cimonitor.ChecksPassedMsg
-	ciNoChecksPassedMsg = cimonitor.NoChecksPassedMsg
-	ciChecksRunningMsg  = cimonitor.ChecksRunningMsg
+	ciChecksPassedMsg                 = cimonitor.ChecksPassedMsg
+	ciNoChecksPassedMsg               = cimonitor.NoChecksPassedMsg
+	ciChecksRunningMsg                = cimonitor.ChecksRunningMsg
+	ciChecksPassedWithoutReceiptMsg   = cimonitor.ChecksPassedWithoutReceiptMsg
+	ciNoChecksPassedWithoutReceiptMsg = cimonitor.NoChecksPassedWithoutReceiptMsg
 )
 
 type prHeadReceipt uint8
@@ -477,10 +479,19 @@ func logCIMonitorHandoff(sctx *pipeline.StepContext, ctx context.Context, host s
 	if err != nil {
 		sctx.Log(fmt.Sprintf("warning: could not check PR head: %v", err))
 	}
+	if receipt == prHeadReceiptMatches {
+		return logCIMonitorStatus(sctx, message, previous)
+	}
+	if receipt == prHeadReceiptUnavailable {
+		if message == ciNoChecksPassedMsg {
+			return logCIMonitorStatus(sctx, ciNoChecksPassedWithoutReceiptMsg, previous)
+		}
+		return logCIMonitorStatus(sctx, ciChecksPassedWithoutReceiptMsg, previous)
+	}
 	if receipt != prHeadReceiptMatches {
 		return logCIMonitorStatus(sctx, ciChecksRunningMsg, previous)
 	}
-	return logCIMonitorStatus(sctx, message, previous)
+	return previous
 }
 
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -328,6 +329,23 @@ func TestRenderCIView_ChecksPassed(t *testing.T) {
 
 	out := stripANSI(renderCIView(run, run.Steps, "", logs, 80))
 
+	if !strings.Contains(out, "Checks passed") {
+		t.Errorf("expected checks-passed indicator, got: %s", out)
+	}
+	if strings.Contains(out, "Monitoring CI checks...") {
+		t.Errorf("expected ready state to replace the monitoring indicator, got: %s", out)
+	}
+}
+
+func TestRenderCIView_UnverifiedChecksPassed(t *testing.T) {
+	run := testRunWithCI()
+	run.Steps[5].Status = types.StepStatusRunning
+	logs := []string{
+		"monitoring CI for PR #42 (timeout: 4h)...",
+		cimonitor.ChecksPassedWithoutReceiptMsg,
+	}
+
+	out := stripANSI(renderCIView(run, run.Steps, "", logs, 80))
 	if !strings.Contains(out, "Checks passed") {
 		t.Errorf("expected checks-passed indicator, got: %s", out)
 	}

@@ -51,6 +51,11 @@ func TestChecksPassed(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "unverified checks passed",
+			logs: []string{ChecksPassedWithoutReceiptMsg},
+			want: false,
+		},
+		{
 			name: "still monitoring before checks pass",
 			logs: []string{"monitoring CI for PR #42 (timeout: 4h)..."},
 			want: false,
@@ -92,6 +97,16 @@ func TestChecksPassed(t *testing.T) {
 				t.Errorf("ChecksPassed() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseActivity_UnverifiedSuccessKeepsHumanStatus(t *testing.T) {
+	a := ParseActivity([]string{ChecksPassedWithoutReceiptMsg})
+	if !a.Ready {
+		t.Fatal("unverified success must preserve the human-ready display")
+	}
+	if a.HandoffReady {
+		t.Fatal("unverified success must not become an agent handoff")
 	}
 }
 
