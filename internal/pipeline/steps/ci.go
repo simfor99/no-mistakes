@@ -204,6 +204,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
 	headDriftLogged := false
+	headReconciled := false
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
@@ -269,6 +270,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			sctx.Log(fmt.Sprintf("warning: could not check PR head: %v", headErr))
 		}
 		headDrifted := receipt == prHeadReceiptDrifted
+		if headDrifted && sctx.Fixing {
+			reconciled, reconcileErr := reconcileFixModeHead(sctx, pr.HeadSHA)
+			if reconcileErr != nil {
+				sctx.Log(fmt.Sprintf("warning: could not reconcile locally updated PR head: %v", reconcileErr))
+			} else if reconciled {
+				receipt = prHeadReceiptMatches
+				headDrifted = false
+				headReconciled = true
+			}
+		}
 		if headDrifted {
 			timeoutFailingChecks = timeoutFailingChecks[:0]
 			timeoutMergeConflict = false
@@ -365,7 +376,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 								issueDesc = "merge conflict"
 							}
 						}
-						if sctx.Fixing && !manualFixAttempted {
+						if headReconciled {
+							headReconciled = false
+							s.lastFixedChecks = fixKey
+							s.lastFixedCompletedAt = fixCompletedAt
+							sctx.Log("PR head reconciled; waiting for CI re-run...")
+						} else if sctx.Fixing && !manualFixAttempted {
 							manualFixAttempted = true
 							sctx.Log(fmt.Sprintf("issues detected: %s - manual fix requested...", issueDesc))
 							previousHeadSHA := sctx.Run.HeadSHA
@@ -472,6 +488,34 @@ func prHeadReceiptForRun(ctx context.Context, host scm.Host, pr *scm.PR, runHead
 		return prHeadReceiptMatches, nil
 	}
 	return prHeadReceiptDrifted, nil
+}
+
+// reconcileFixModeHead accepts a head drift only when the CI fix worktree is
+// already at the exact live PR head and that head is a forward continuation of
+// the run's recorded head. This preserves the existing stale-run recovery path
+// without allowing an unrelated remote update to bypass the exact-head guard.
+func reconcileFixModeHead(sctx *pipeline.StepContext, liveHead string) (bool, error) {
+	if strings.TrimSpace(liveHead) == "" || strings.TrimSpace(sctx.Run.HeadSHA) == "" {
+		return false, nil
+	}
+	localHead, err := stepGitHeadSHA(sctx)
+	if err != nil {
+		return false, fmt.Errorf("resolve local head: %w", err)
+	}
+	if !strings.EqualFold(localHead, liveHead) {
+		return false, nil
+	}
+	if strings.EqualFold(sctx.Run.HeadSHA, liveHead) {
+		return true, nil
+	}
+	if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", sctx.Run.HeadSHA, liveHead); err != nil {
+		return false, nil
+	}
+	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, liveHead); err != nil {
+		return false, err
+	}
+	sctx.Run.HeadSHA = liveHead
+	return true, nil
 }
 
 func logCIMonitorHandoff(sctx *pipeline.StepContext, ctx context.Context, host scm.Host, pr *scm.PR, message, previous string) string {
