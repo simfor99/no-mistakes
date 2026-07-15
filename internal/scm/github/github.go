@@ -272,6 +272,17 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	return normalizePRState(strings.TrimSpace(string(out))), nil
 }
 
+func (h *Host) GetPRHead(ctx context.Context, pr *scm.PR) (string, error) {
+	args := append([]string{"pr", "view", pr.Number}, h.repoArgs()...)
+	args = append(args, "--json", "headRefOid", "--jq", ".headRefOid")
+	cmd := h.cmd(ctx, "gh", args...)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view head: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	if pr != nil && pr.HeadSHA != "" && pr.BaseBranch != "" && githubAPIRepo(h.repo) != "" {
 		return h.getChecksWithProvenance(ctx, pr)

@@ -385,6 +385,44 @@ func TestCIStep_AllChecksPassingKeepsMonitoringOpenPR(t *testing.T) {
 	}
 }
 
+func TestCIStep_LivePRHeadDriftSuppressesChecksPassed(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env := append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`), "FAKE_CLI_LIVE_HEAD=external-head")
+
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 10 * time.Second
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+
+	step := &CIStep{waitForNextPoll: func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}}
+	if _, err := step.Execute(sctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+	if cimonitor.ChecksPassed(logs) {
+		t.Fatalf("head drift must suppress checks-passed handoff: %v", logs)
+	}
+	running := false
+	for _, log := range logs {
+		if log == ciChecksRunningMsg {
+			running = true
+			break
+		}
+	}
+	if !running {
+		t.Fatalf("head drift must clear ready status: %v", logs)
+	}
+}
+
 func TestCIStep_UnprotectedLinklessLegacyPendingReportsChecksPassed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

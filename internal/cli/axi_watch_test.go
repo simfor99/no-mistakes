@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
@@ -19,6 +20,15 @@ func TestWaitForWatchSignalSkipsLogChunks(t *testing.T) {
 	events <- ipc.Event{Type: ipc.EventRunUpdated}
 	if got := waitForWatchSignal(context.Background(), events, nil); got != watchSignalEvent {
 		t.Fatalf("waitForWatchSignal() = %v, want event after log chunk", got)
+	}
+}
+
+func TestWaitForWatchSignalReconcilesCIStatusChunk(t *testing.T) {
+	message := cimonitor.ChecksPassedMsg
+	events := make(chan ipc.Event, 1)
+	events <- ipc.Event{Type: ipc.EventLogChunk, Content: &message}
+	if got := waitForWatchSignal(context.Background(), events, nil); got != watchSignalEvent {
+		t.Fatalf("waitForWatchSignal() = %v, want CI status event", got)
 	}
 }
 

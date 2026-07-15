@@ -39,6 +39,10 @@ func handleFakeCLI(mode string) {
 		}
 	}
 	logFakeCLIStdinBody(args, logFile)
+	if strings.HasPrefix(mode, "ci-gh") && isFakeCIGHHeadRequest(args) {
+		fmt.Println(fakeCIGHLiveHead())
+		return
+	}
 
 	switch mode {
 	case "gh":
@@ -70,6 +74,23 @@ func handleFakeCLI(mode string) {
 	default:
 		os.Exit(1)
 	}
+}
+
+func isFakeCIGHHeadRequest(args []string) bool {
+	joined := strings.Join(args, " ")
+	return strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid")
+}
+
+func fakeCIGHLiveHead() string {
+	if head := os.Getenv("FAKE_CLI_LIVE_HEAD"); head != "" {
+		return head
+	}
+	out, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func logFakeCLIStdinBody(args []string, logFile string) {

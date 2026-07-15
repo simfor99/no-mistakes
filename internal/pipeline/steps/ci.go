@@ -252,6 +252,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			sctx.Log("PR has been closed")
 			return &pipeline.StepOutcome{}, nil
 		}
+		receiptMatchesHead, headErr := prHeadMatchesRun(ctx, host, pr, sctx.Run.HeadSHA)
+		if headErr != nil {
+			sctx.Log(fmt.Sprintf("warning: could not check PR head: %v", headErr))
+		}
 
 		// Check mergeable state if the provider supports it
 		mergeConflict := false
@@ -277,7 +281,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 		// Check CI status - wait for all checks to complete before fixing
 		ciFixLimit := sctx.Config.AutoFix.CI
-		pr.HeadSHA = sctx.Run.HeadSHA
 		checks, err := host.GetChecks(ctx, pr)
 		if err != nil {
 			lastMonitorLog = ""
@@ -378,7 +381,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				case len(checks) == 0:
 					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
 				default:
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+					if receiptMatchesHead {
+						receiptMatchesHead, _ = prHeadMatchesRun(ctx, host, pr, sctx.Run.HeadSHA)
+					}
+					if !receiptMatchesHead {
+						lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+					} else {
+						lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+					}
 				}
 			}
 		}
@@ -409,6 +419,19 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return nil, err
 		}
 	}
+}
+
+func prHeadMatchesRun(ctx context.Context, host scm.Host, pr *scm.PR, runHead string) (bool, error) {
+	resolver, ok := host.(scm.PRHeadResolver)
+	if !ok {
+		return true, nil
+	}
+	liveHead, err := resolver.GetPRHead(ctx, pr)
+	if err != nil {
+		return false, err
+	}
+	pr.HeadSHA = liveHead
+	return liveHead != "" && runHead != "" && strings.EqualFold(liveHead, runHead), nil
 }
 
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {

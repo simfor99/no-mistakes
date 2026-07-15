@@ -11,6 +11,7 @@ import (
 
 	toon "github.com/toon-format/toon-go"
 
+	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -154,13 +155,23 @@ func waitForWatchSignal(ctx context.Context, events <-chan ipc.Event, timer <-ch
 			if !ok {
 				return watchSignalClosed
 			}
-			if event.Type != ipc.EventLogChunk {
+			if watchEventRequiresReconciliation(event) {
 				return watchSignalEvent
 			}
 		case <-timer:
 			return watchSignalTimer
 		}
 	}
+}
+
+func watchEventRequiresReconciliation(event ipc.Event) bool {
+	if event.Type != ipc.EventLogChunk {
+		return true
+	}
+	if event.Content == nil {
+		return false
+	}
+	return cimonitor.ParseActivity([]string{strings.TrimSpace(*event.Content)}).LastEvent != ""
 }
 
 func latchWatchAttention(until watchUntil, reason string) bool {

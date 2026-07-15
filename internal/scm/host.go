@@ -205,3 +205,7 @@ type Host interface {
 	// and ErrUnsupported when the provider has no log-fetching support at all.
 	FetchFailedCheckLogs(ctx context.Context, pr *PR, branch, headSHA string, failingNames []string) (string, error)
 }
+
+type PRHeadResolver interface {
+	GetPRHead(ctx context.Context, pr *PR) (string, error)
+}

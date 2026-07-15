@@ -190,6 +190,21 @@ func TestGetChecksFallsBackToStateWhenBucketMissing(t *testing.T) {
 	}
 }
 
+func TestGetPRHeadPassesRepoFlag(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "abc123\n"},
+	}), nil, "", "test/repo")
+
+	head, err := host.GetPRHead(context.Background(), &scm.PR{Number: "123"})
+	if err != nil {
+		t.Fatalf("GetPRHead() error = %v", err)
+	}
+	if head != "abc123" {
+		t.Fatalf("GetPRHead() = %q, want abc123", head)
+	}
+}
+
 func TestGetChecksParsesCompletedAt(t *testing.T) {
 	t.Parallel()
 
