@@ -479,6 +479,69 @@ func TestCIStep_LivePRHeadDriftSkipsAutoFix(t *testing.T) {
 	}
 }
 
+func TestCIStep_FixModeReconcilesForwardLocalPRHead(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "ci-fix.txt"), []byte("already applied CI fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "ci-fix.txt")
+	gitCmd(t, dir, "commit", "-m", "apply CI fix")
+	liveHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	prURL := "https://github.com/test/repo/pull/42"
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	persistedRepo, err := sctx.DB.InsertRepoWithID(sctx.Repo.ID, dir, sctx.Repo.UpstreamURL, sctx.Repo.DefaultBranch)
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	persistedRun, err := sctx.DB.InsertRun(persistedRepo.ID, sctx.Run.Branch, headSHA, baseSHA)
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	sctx.Run = persistedRun
+	sctx.Run.PRURL = &prURL
+	sctx.Env = append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"FAILURE","bucket":"fail"}]`), "FAKE_CLI_LIVE_HEAD="+liveHead)
+	sctx.Config.CITimeout = -1
+	sctx.Fixing = true
+
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+	step := &CIStep{waitForNextPoll: func(ctx context.Context, _ time.Duration) error {
+		cancel()
+		return ctx.Err()
+	}}
+	if _, err := step.Execute(sctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() error = %v, want context.Canceled", err)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatalf("already reconciled local CI fix must not invoke another fixer, got %d calls", len(ag.calls))
+	}
+	if sctx.Run.HeadSHA != liveHead {
+		t.Fatalf("run head = %s, want reconciled live head %s", sctx.Run.HeadSHA, liveHead)
+	}
+	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatalf("load reconciled run: %v", err)
+	}
+	if persisted == nil || persisted.HeadSHA != liveHead {
+		t.Fatalf("persisted head = %v, want %s", persisted, liveHead)
+	}
+	reconciledLog := false
+	for _, log := range logs {
+		if log == "PR head reconciled; waiting for CI re-run..." {
+			reconciledLog = true
+			break
+		}
+	}
+	if !reconciledLog {
+		t.Fatalf("expected reconciled-head wait log, got: %v", logs)
+	}
+}
+
 func TestCIStep_UnprotectedLinklessLegacyPendingKeepsMonitoring(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

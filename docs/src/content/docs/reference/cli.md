@@ -66,6 +66,7 @@ no-mistakes axi
 
 With no subcommand, shows the executable path, description, repo, current branch, daemon state, recent runs, and next-step help, including a pointer to `no-mistakes axi run --help` and the installed `/no-mistakes` skill for full driving guidance.
 When the current branch has an active run, that run appears as `active_run` with any approval gate and help for `axi respond` when it is parked or `axi status` when it is still running.
+Every AXI run object includes a short `head` for scanning and the full stored `head_sha` for exact-head receipts.
 If an active run object is parked at a decision gate, it includes `awaiting_agent: parked <duration>` immediately after `status`.
 That field is observability only; the `gate:` object still tells the agent which response to send.
 If a step is actively `running` or `fixing`, the run object can also include an `active_steps` table with `active_for`, `last_activity`, native `agent_pid` when one is currently running, and the current execution or fix round.
@@ -106,7 +107,7 @@ Review gates include a `note` field reminding agents that `auto_fix.review` defa
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step is still monitoring an open PR and checks are green, `axi run` exits successfully with `outcome: checks-passed` only when a live PR-head receipt matches the stored run `head_sha`; providers without live-head provenance retain the human CI success display but do not emit that agent handoff.
-If the calling workflow explicitly confirms merge authority, keep the active agent turn open, perform external review triage, and verify a fresh exact-head receipt before invoking that workflow's authorized merge contract. Green CI alone never grants merge authority. Otherwise report that the PR is ready and ask the user to decide whether to merge.
+Only an explicitly Smart-Commit-authorized driver may merge; Smart Commit explicitly confirms merge authority. Keep the active agent turn open, perform external review triage, then take a fresh exact-head receipt a second time immediately before Smart Commit's one merge attempt. The `checks-passed` handoff is the first live-PR receipt; the second must match the full `head_sha` against the fresh GitHub PR head and local Git HEAD. Green CI alone never grants merge authority. Without that authority, report that the PR is ready and ask Simon whether to merge.
 If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
 The monitor auto-rebases onto the base, resolves actual conflicts, and re-pushes the branch; a PR that is merely behind but clean needs no command.
 Use `no-mistakes rerun` only after that monitor is no longer running, such as a closed PR, aborted or superseded run, idle timeout, or exhausted CI auto-fix attempts.
@@ -153,7 +154,7 @@ no-mistakes axi watch --run <id> --until terminal
 | `--run` | `string` | (none) | Run ID to watch; required |
 | `--until` | `string` | `attention` | `attention` stops at a gate, quiet signal, terminal result, or `checks-passed`; `terminal` keeps waiting through quiet signals |
 
-For `--until attention`, only a CI-ready handoff with a live PR-head receipt matching the stored run `head_sha` returns the top-level `outcome: checks-passed`. Gate and quiet stops are attention signals, never merge authority. A terminal stop preserves the terminal outcome and any recorded error. `head_sha` is the full stored run SHA; use it with fresh GitHub and local Git values for an exact-head receipt, not as authority to merge.
+For `--until attention`, only a CI-ready handoff with a live PR-head receipt matching the stored run `head_sha` returns the top-level `outcome: checks-passed`. Gate and quiet stops are attention signals, never merge authority. A terminal stop preserves the terminal outcome and any recorded error. `head_sha` is the full stored run SHA; the handoff is the first live-PR receipt, and an explicitly Smart-Commit-authorized driver takes a fresh exact-head receipt a second time immediately before Smart Commit's one merge attempt by matching it to fresh GitHub and local Git values.
 
 ## no-mistakes axi status
 

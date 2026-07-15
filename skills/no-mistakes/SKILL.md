@@ -167,12 +167,15 @@ Run the pipeline and decide on its findings as they come up:
 3. Repeat step 2 until the output has an `outcome:` instead of a `gate:`. The
    outcomes are:
    - `checks-passed` - the change is validated and CI is green, but the PR is
-     not merged yet. If the calling workflow explicitly confirms merge authority,
-     keep the active agent turn open, perform external review triage, and verify a
-     fresh exact-head receipt before invoking that workflow's authorized merge
-     contract. Green CI alone never grants merge authority. Otherwise report that
-     the PR is ready and ask the user to decide whether to merge (the PR link is in
-     the `help` line). no-mistakes keeps monitoring the PR in the background
+     not merged yet. Only an explicitly Smart-Commit-authorized driver may merge;
+     Smart Commit explicitly confirms merge authority. Keep the active agent turn
+     open, perform external review triage, then take a fresh exact-head receipt a
+     second time immediately before Smart Commit's one merge attempt. The
+     `checks-passed` handoff is the first live-PR receipt; the second must match the full
+     `head_sha` against the fresh GitHub PR head and local Git HEAD. Green CI alone never grants merge authority.
+     Without that authority, report that the PR is ready and ask Simon whether to
+     merge (the PR link is in the `help` line).
+     no-mistakes keeps monitoring the PR in the background
      until it is merged, closed, or its configured idle timeout elapses, so a human
      can watch it in the TUI.
    - `passed` - the changes cleared the gate and the PR was merged or closed.

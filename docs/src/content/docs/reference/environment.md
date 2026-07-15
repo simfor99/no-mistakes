@@ -34,6 +34,17 @@ Override how long a CLI client waits for an existing daemon socket to accept a c
 
 Takes precedence over `daemon_connect_timeout` in `config.yaml`. An empty, unparsable, or non-positive value is ignored and the config value (or its default) is used instead.
 
+## `NO_MISTAKES_WIZARD_AGENT_TIMEOUT`
+
+Override the time the setup wizard allows an agent to suggest a branch name or commit subject.
+
+|         |                         |
+| ------- | ----------------------- |
+| Type    | `string` (Go duration)  |
+| Default | `60s`                   |
+
+An empty, unparsable, or non-positive value falls back to `60s`.
+
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
 Bitbucket Cloud account email used for PR creation and CI monitoring.
