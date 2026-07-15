@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -105,4 +107,53 @@ func TestRenderWatchResultIncludesTerminalError(t *testing.T) {
 			t.Errorf("watch output missing %q in:\n%s", want, out.String())
 		}
 	}
+}
+
+func TestAxiWatchCommandReportsTerminalFailure(t *testing.T) {
+	repoDir := setupTestRepo(t)
+	p, err := paths.New()
+	if err != nil {
+		t.Fatalf("paths.New() error = %v", err)
+	}
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error = %v", err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepoWithID("repo-watch", repoDir, "origin", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/watch", "abcdef1234567890", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunError(run.ID, "review failed"); err != nil {
+		t.Fatalf("mark run failed: %v", err)
+	}
+
+	output, err := executeCmd("axi", "watch", "--run", run.ID)
+	if err == nil {
+		t.Fatal("axi watch error = nil, want terminal failure exit")
+	}
+	if exit, ok := err.(*exitError); !ok || exit.code != 1 {
+		t.Fatalf("axi watch error = %#v, want exit code 1", err)
+	}
+	for _, want := range []string{
+		"status: failed",
+		"stop: terminal",
+		"terminal: true",
+		"supervision: active_agent_required",
+		"auto_resumed: false",
+		"outcome: failed",
+		"error: review failed",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("axi watch output missing %q in:\n%s", want, output)
+		}
+	}
+	t.Logf("end-user axi watch transcript:\n%s", output)
 }

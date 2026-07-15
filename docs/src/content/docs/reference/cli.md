@@ -174,11 +174,11 @@ no-mistakes axi watch --run <id> --until terminal
 | `--run` | `string` | (none) | Explicit run ID to observe; required |
 | `--until` | `string` | `attention` | `attention` or `terminal` |
 
-`--until attention` exits successfully with one bounded TOON snapshot when the run reaches an approval or fix-review gate, reports `outcome: checks-passed`, becomes quiet for longer than `step_quiet_warning`, or terminates. The snapshot includes `watch.stop` so a supervisor can distinguish `gate`, `checks-passed`, `quiet`, and `terminal`.
+`--until attention` returns one bounded TOON snapshot when the run reaches an approval or fix-review gate, reports `outcome: checks-passed`, becomes quiet for longer than `step_quiet_warning`, or terminates. Gates, checks-passed, quiet, and a passed terminal outcome exit successfully; failed and cancelled terminal outcomes exit `1`. The snapshot includes `watch.stop` so a supervisor can distinguish `gate`, `checks-passed`, `quiet`, and `terminal`.
 
-`--until terminal` keeps waiting through gates, checks-passed, and quiet warnings, and returns only for a terminal outcome. In either mode, Ctrl-C stops only the watch process (exit code `130`); it never cancels the run.
+`--until terminal` keeps waiting through gates, checks-passed, and quiet warnings, and returns only for a terminal outcome. A failed or cancelled terminal outcome exits `1`. In either mode, Ctrl-C stops only the watch process (exit code `130`); it never cancels the run.
 
-The command uses daemon events as a wake-up signal and re-reads the current run state before deciding. If that event stream ends, it performs one final read and reports `stream-interrupted` if the run is still non-terminal. Gate output is limited to ten findings; use `no-mistakes axi logs --step <step> --full` for full detail.
+The command uses daemon events as a wake-up signal and re-reads the current run state before deciding. If that event stream ends, it performs one final read and reports `stream-interrupted` with exit `1` if the run is still non-terminal. Gate output is limited to ten findings; use `no-mistakes axi logs --step <step> --full` for full detail.
 
 In a Codex-supervised flow, keep `axi watch` as a foreground tool call when the active turn is deliberately staying open. When it returns, that same turn decides whether to report, run an explicit `axi respond`, and attach a fresh `axi watch` for the same run. The command alone cannot continue a session that has already been closed or deliberately returned to the user.
 

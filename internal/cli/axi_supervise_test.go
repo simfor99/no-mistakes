@@ -184,6 +184,62 @@ func TestAxiSuperviseArmBindsLinkedWorktree(t *testing.T) {
 	}
 }
 
+func TestAxiSuperviseCommandsPersistOnlyLocalRegistration(t *testing.T) {
+	repoDir := setupTestRepo(t)
+	p, err := paths.New()
+	if err != nil {
+		t.Fatalf("paths.New() error = %v", err)
+	}
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error = %v", err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepoWithID("repo-supervise", repoDir, "origin", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/supervise", "head", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+
+	armed, err := executeCmd("axi", "supervise", "arm", "--run", run.ID)
+	if err != nil {
+		t.Fatalf("axi supervise arm error = %v", err)
+	}
+	for _, want := range []string{
+		"supervision: armed",
+		"run_id: \"" + run.ID + "\"",
+		"hook_required: true",
+		"without it, no worker will start",
+	} {
+		if !strings.Contains(armed, want) {
+			t.Errorf("axi supervise arm output missing %q in:\n%s", want, armed)
+		}
+	}
+
+	status, err := executeCmd("axi", "supervise", "status", "--run", run.ID)
+	if err != nil {
+		t.Fatalf("axi supervise status error = %v", err)
+	}
+	for _, want := range []string{"supervision: armed", "session_bound: false"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("axi supervise status output missing %q in:\n%s", want, status)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".codex", "hooks.json")); !os.IsNotExist(err) {
+		t.Fatalf("axi supervise arm wrote a global Codex hook: %v", err)
+	}
+	t.Logf("end-user axi supervise transcript:\n%s%s", armed, status)
+}
+
 func TestAxiSuperviseWorkerReleasesClaimAfterResourceFailure(t *testing.T) {
 	nmHome := t.TempDir()
 	t.Setenv("NM_HOME", nmHome)
