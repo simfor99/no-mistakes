@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -212,5 +213,58 @@ func TestAxiSuperviseWorkerDoesNotResumeUnchangedEventTwice(t *testing.T) {
 	reg, found, err = store.Get(dbRun.ID)
 	if err != nil || !found || reg.Phase != supervision.PhaseAwaitingUser {
 		t.Fatalf("Get() after unchanged event = (%+v, %v, %v), want awaiting user", reg, found, err)
+	}
+}
+
+func TestAxiSuperviseWorkerRecordsStepReadFailure(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	p := paths.WithRoot(nmHome)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error = %v", err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepoWithID("repo-1", t.TempDir(), "origin", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	dbRun, err := database.InsertRun(repo.ID, "feature/supervise", "head", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	store := supervision.NewStore(p.SupervisionDir())
+	reg, err := store.Arm(supervision.Registration{RunID: dbRun.ID, RepoID: repo.ID, CWD: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Arm() error = %v", err)
+	}
+	reg, claimed, err := store.Claim(reg.CWD, "session-1")
+	if err != nil || !claimed {
+		t.Fatalf("Claim() = (%+v, %v, %v), want claimed registration", reg, claimed, err)
+	}
+
+	previousWatch, previousSteps := superviseWatch, superviseSteps
+	t.Cleanup(func() {
+		superviseWatch = previousWatch
+		superviseSteps = previousSteps
+	})
+	superviseWatch = func(string, string, string) error { return nil }
+	superviseSteps = func(*db.DB, string) ([]*db.StepResult, error) { return nil, errors.New("step read unavailable") }
+
+	if got, err := store.AcquireWorker(dbRun.ID); err != nil || !got {
+		t.Fatalf("AcquireWorker() = (%v, %v), want (true, nil)", got, err)
+	}
+	if err := runAxiSuperviseWorker(dbRun.ID); err == nil {
+		t.Fatal("runAxiSuperviseWorker() error = nil, want step read failure")
+	}
+	updated, found, err := store.Get(dbRun.ID)
+	if err != nil || !found || updated.Phase != supervision.PhaseResumeFailed || !strings.Contains(updated.Error, "step read unavailable") {
+		t.Fatalf("Get() after step read failure = (%+v, %v, %v), want visible failure", updated, found, err)
 	}
 }

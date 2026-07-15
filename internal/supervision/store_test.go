@@ -129,6 +129,24 @@ func TestStoreHoldWorkerReleasesMarker(t *testing.T) {
 	}
 }
 
+func TestStoreReleaseWorkerKeepsActiveWorkerMarker(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if got, err := store.AcquireWorker("run-1"); err != nil || !got {
+		t.Fatalf("AcquireWorker() = (%v, %v), want (true, nil)", got, err)
+	}
+	worker, held, err := store.HoldWorker("run-1")
+	if err != nil || !held {
+		t.Fatalf("HoldWorker() = (%v, %v, %v), want held lock", worker, held, err)
+	}
+	defer worker.Release()
+	if err := store.ReleaseWorker("run-1"); err != nil {
+		t.Fatalf("ReleaseWorker() error = %v", err)
+	}
+	if _, err := os.Stat(store.workerLockPath("run-1")); err != nil {
+		t.Fatalf("active worker marker missing: %v", err)
+	}
+}
+
 func TestStoreHandoffRejectsRepeatedFingerprint(t *testing.T) {
 	store := NewStore(t.TempDir())
 	if _, err := store.Arm(Registration{RunID: "run-1", RepoID: "repo-1", CWD: "/work"}); err != nil {

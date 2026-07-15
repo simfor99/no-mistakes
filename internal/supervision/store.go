@@ -199,11 +199,7 @@ func (s *Store) AcquireWorker(runID string) (bool, error) {
 }
 
 func (s *Store) ReleaseWorker(runID string) error {
-	err := os.Remove(s.workerLockPath(runID))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	return s.releaseWorker(runID, nil)
 }
 
 func (s *Store) HoldWorker(runID string) (*WorkerLock, bool, error) {
@@ -234,9 +230,28 @@ func (l *WorkerLock) Release() error {
 	}
 	file := l.file
 	l.file = nil
-	_ = unlockStoreFile(file)
-	closeErr := file.Close()
-	removeErr := l.store.ReleaseWorker(l.runID)
+	return l.store.releaseWorker(l.runID, file)
+}
+
+func (s *Store) releaseWorker(runID string, owned *os.File) error {
+	lock, err := acquireStoreLockWait(filepath.Join(s.dir, ".claim.lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	if owned == nil {
+		var held bool
+		owned, held, err = s.tryWorkerLock(runID)
+		if err != nil || !held {
+			return err
+		}
+	}
+	_ = unlockStoreFile(owned)
+	closeErr := owned.Close()
+	removeErr := os.Remove(s.workerLockPath(runID))
+	if os.IsNotExist(removeErr) {
+		removeErr = nil
+	}
 	if closeErr != nil {
 		return fmt.Errorf("close worker lock: %w", closeErr)
 	}

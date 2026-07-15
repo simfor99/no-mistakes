@@ -31,6 +31,7 @@ type codexHookEvent struct {
 var (
 	superviseResume = resumeCodexSession
 	superviseWatch  = runWatchProcess
+	superviseSteps  = func(d *db.DB, runID string) ([]*db.StepResult, error) { return d.GetStepsByRun(runID) }
 )
 
 func newAxiSuperviseCmd() *cobra.Command {
@@ -252,9 +253,9 @@ func runAxiSuperviseWorker(runID string) error {
 		reg.Phase = supervision.PhaseCompleted
 		return store.Save(reg)
 	}
-	steps, err := d.GetStepsByRun(runID)
+	steps, err := superviseSteps(d, runID)
 	if err != nil {
-		return fmt.Errorf("load watched run steps: %w", err)
+		return recordSupervisorWorkerFailure(store, runID, "load watched run steps: "+err.Error())
 	}
 	reg, resume, err := store.Handoff(runID, supervisorFingerprint(run, steps))
 	if err != nil {

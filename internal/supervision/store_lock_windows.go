@@ -21,6 +21,17 @@ func tryLockStoreFile(file *os.File) error {
 	)
 }
 
+func lockStoreFile(file *os.File) error {
+	return windows.LockFileEx(
+		windows.Handle(file.Fd()),
+		windows.LOCKFILE_EXCLUSIVE_LOCK,
+		0,
+		1,
+		0,
+		&windows.Overlapped{Offset: storeLockOffset},
+	)
+}
+
 func unlockStoreFile(file *os.File) error {
 	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &windows.Overlapped{Offset: storeLockOffset})
 }
