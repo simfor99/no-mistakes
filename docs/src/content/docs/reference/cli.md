@@ -159,6 +159,53 @@ Each row reports how long the step has been active, the latest meaningful log or
 If no activity arrives for longer than `step_quiet_warning`, `last_activity` is prefixed with `quiet`; this is only a liveness signal and does not cancel the step.
 For older active runs with no recorded activity timestamp, AXI falls back to the step log file modification time.
 
+## no-mistakes axi watch
+
+Wait on one existing run until it needs attention or reaches a terminal outcome. This is a read-only attachment: it never starts the daemon, sends `axi respond`, changes the worktree, or creates a run.
+
+```sh
+no-mistakes axi watch --run <id>
+no-mistakes axi watch --run <id> --until attention
+no-mistakes axi watch --run <id> --until terminal
+```
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--run` | `string` | (none) | Explicit run ID to observe; required |
+| `--until` | `string` | `attention` | `attention` or `terminal` |
+
+`--until attention` exits successfully with one bounded TOON snapshot when the run reaches an approval or fix-review gate, reports `outcome: checks-passed`, becomes quiet for longer than `step_quiet_warning`, or terminates. The snapshot includes `watch.stop` so a supervisor can distinguish `gate`, `checks-passed`, `quiet`, and `terminal`.
+
+`--until terminal` keeps waiting through gates, checks-passed, and quiet warnings, and returns only for a terminal outcome. In either mode, Ctrl-C stops only the watch process (exit code `130`); it never cancels the run.
+
+The command uses daemon events as a wake-up signal and re-reads the current run state before deciding. If that event stream ends, it performs one final read and reports `stream-interrupted` if the run is still non-terminal. Gate output is limited to ten findings; use `no-mistakes axi logs --step <step> --full` for full detail.
+
+In a Codex-supervised flow, keep `axi watch` as a foreground tool call when the active turn is deliberately staying open. When it returns, that same turn decides whether to report, run an explicit `axi respond`, and attach a fresh `axi watch` for the same run. The command alone cannot continue a session that has already been closed or deliberately returned to the user.
+
+## no-mistakes axi supervise
+
+The optional Codex CLI supervisor fills that closed-turn gap without polling. It is intentionally two-part: arm the known run, then install and trust one local Codex Stop hook yourself. No-Mistakes never edits `~/.codex/hooks.json` automatically.
+
+```sh
+no-mistakes axi supervise arm --run <id>
+no-mistakes axi supervise status --run <id>
+```
+
+Merge this hook into your reviewed `~/.codex/hooks.json` configuration; do not replace any hooks you already use:
+
+```json
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "type": "command", "command": "no-mistakes axi codex-hook" }] }]
+  }
+}
+```
+
+On a matching Codex turn end, the hook claims only the armed run in the same working directory. A detached worker waits for an AXI event, resumes the same session exactly once, and never answers a gate itself. A terminal run completes the registration. A run parked at a user decision is marked `awaiting_user` and does not resume until that same session has received Simon's answer and later ends again; then the hook attaches the next watch phase for the same run.
+
+The hook reads a Codex lifecycle event from standard input. It is a local trust boundary: review and trust it through Codex before use. The worker uses the installed `codex` executable and a saved session ID; a missing binary or failed resume is recorded as a local supervisor error and does not alter the pipeline.
+`axi supervise status --run <id>` reports that local phase and any stored error without exposing the saved Codex session ID.
+
 ## no-mistakes axi logs
 
 Show the log output of one pipeline step.
