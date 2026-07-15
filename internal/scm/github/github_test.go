@@ -304,6 +304,84 @@ func TestGetChecksAddsMissingRequiredContextAsBlockingPending(t *testing.T) {
 	}
 }
 
+func TestGetChecksRequiresMatchingAppForRequiredCheck(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		protection  githubTestResponse
+		rules       string
+		appID       int
+		wantChecks  int
+		wantPending bool
+	}{
+		{
+			name:        "branch protection rejects another app",
+			protection:  githubTestResponse{stdout: `{"contexts":[],"checks":[{"context":"verify","app_id":101}]}` + "\n"},
+			rules:       "[]\n",
+			appID:       202,
+			wantChecks:  2,
+			wantPending: true,
+		},
+		{
+			name:        "branch protection accepts matching app",
+			protection:  githubTestResponse{stdout: `{"contexts":[],"checks":[{"context":"verify","app_id":101}]}` + "\n"},
+			rules:       "[]\n",
+			appID:       101,
+			wantChecks:  1,
+			wantPending: false,
+		},
+		{
+			name:        "ruleset rejects another integration",
+			protection:  githubTestResponse{stderr: "Branch not protected", code: 1},
+			rules:       `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"verify","integration_id":101}]}}]` + "\n",
+			appID:       202,
+			wantChecks:  2,
+			wantPending: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh api repos/test/repo/branches/main/protection/required_status_checks": tc.protection,
+				"gh api --paginate repos/test/repo/rules/branches/main":                  {stdout: tc.rules},
+				"gh api --paginate repos/test/repo/commits/abc/check-runs?per_page=100":  {stdout: fmt.Sprintf(`{"check_runs":[{"name":"verify","status":"completed","conclusion":"success","app":{"id":%d}}]}`+"\n", tc.appID)},
+				"gh api --paginate repos/test/repo/commits/abc/statuses?per_page=100":    {stdout: "[]\n"},
+			}), nil, "", "test/repo")
+
+			checks, err := host.GetChecks(context.Background(), &scm.PR{HeadSHA: "abc", BaseBranch: "main"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			pending := 0
+			for _, check := range checks {
+				if check.Pending() {
+					pending++
+				}
+			}
+			if len(checks) != tc.wantChecks || (pending > 0) != tc.wantPending {
+				t.Fatalf("checks = %+v, want %d checks with pending=%t", checks, tc.wantChecks, tc.wantPending)
+			}
+		})
+	}
+}
+
+func TestGetChecksEscapesBaseBranchInPolicyRequests(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/branches/release%2F2026/protection/required_status_checks": {stdout: `{"contexts":["verify"]}` + "\n"},
+		"gh api --paginate repos/test/repo/rules/branches/release%2F2026":                  {stdout: "[]\n"},
+		"gh api --paginate repos/test/repo/commits/abc/check-runs?per_page=100":            {stdout: `{"check_runs":[{"name":"verify","status":"completed","conclusion":"success"}]}` + "\n"},
+		"gh api --paginate repos/test/repo/commits/abc/statuses?per_page=100":              {stdout: "[]\n"},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{HeadSHA: "abc", BaseBranch: "release/2026"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 || checks[0].Pending() {
+		t.Fatalf("checks = %+v, want one passed check", checks)
+	}
+}
+
 func TestGetChecksFailsClosedWhenProtectionCannotBeRead(t *testing.T) {
 	t.Parallel()
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{

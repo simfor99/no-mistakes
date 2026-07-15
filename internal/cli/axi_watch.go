@@ -21,10 +21,19 @@ import (
 
 type watchUntil string
 
+type watchSignal uint8
+
 const (
 	watchUntilAttention watchUntil = "attention"
 	watchUntilTerminal  watchUntil = "terminal"
 	maxWatchFindings               = 10
+)
+
+const (
+	watchSignalEvent watchSignal = iota
+	watchSignalTimer
+	watchSignalInterrupted
+	watchSignalClosed
 )
 
 var watchNow = time.Now
@@ -125,15 +134,31 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) error {
 				timer = time.After(delay)
 			}
 		}
+		switch waitForWatchSignal(ctx, events, timer) {
+		case watchSignalInterrupted:
+			return renderWatchInterrupted(cmd)
+		case watchSignalClosed:
+			return reconcileClosedWatchStream(cmd, ctx, read)
+		case watchSignalEvent:
+			attentionLatched = false
+		}
+	}
+}
+
+func waitForWatchSignal(ctx context.Context, events <-chan ipc.Event, timer <-chan time.Time) watchSignal {
+	for {
 		select {
 		case <-ctx.Done():
-			return renderWatchInterrupted(cmd)
-		case _, ok := <-events:
+			return watchSignalInterrupted
+		case event, ok := <-events:
 			if !ok {
-				return reconcileClosedWatchStream(cmd, ctx, read)
+				return watchSignalClosed
 			}
-			attentionLatched = false
+			if event.Type != ipc.EventLogChunk {
+				return watchSignalEvent
+			}
 		case <-timer:
+			return watchSignalTimer
 		}
 	}
 }

@@ -6,11 +6,31 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
+
+func TestWaitForWatchSignalSkipsLogChunks(t *testing.T) {
+	events := make(chan ipc.Event, 2)
+	events <- ipc.Event{Type: ipc.EventLogChunk}
+	events <- ipc.Event{Type: ipc.EventRunUpdated}
+	if got := waitForWatchSignal(context.Background(), events, nil); got != watchSignalEvent {
+		t.Fatalf("waitForWatchSignal() = %v, want event after log chunk", got)
+	}
+}
+
+func TestWaitForWatchSignalKeepsTimerAfterLogChunk(t *testing.T) {
+	events := make(chan ipc.Event, 1)
+	events <- ipc.Event{Type: ipc.EventLogChunk}
+	timer := make(chan time.Time, 1)
+	timer <- time.Now()
+	if got := waitForWatchSignal(context.Background(), events, timer); got != watchSignalTimer {
+		t.Fatalf("waitForWatchSignal() = %v, want timer after log chunk", got)
+	}
+}
 
 func TestLatchWatchAttention(t *testing.T) {
 	for _, tc := range []struct {

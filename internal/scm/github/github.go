@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os/exec"
 	"reflect"
 	"sort"
@@ -27,6 +28,12 @@ type Host struct {
 	host         string // repo's GitHub hostname; scopes the auth check
 	repo         string // "owner/name" slug for --repo; empty when unknown
 	forkOwner    string // fork owner for cross-repository PR heads
+}
+
+type requiredStatusCheck struct {
+	Context  string
+	AppID    int64
+	AppBound bool
 }
 
 // New builds a Host. cliAvailable reports whether the gh binary is
@@ -320,6 +327,9 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 			Status      string `json:"status"`
 			Conclusion  string `json:"conclusion"`
 			CompletedAt string `json:"completed_at"`
+			App         struct {
+				ID int64 `json:"id"`
+			} `json:"app"`
 		} `json:"check_runs"`
 	}
 	if err := h.apiJSONPages(ctx, "repos/"+repo+"/commits/"+pr.HeadSHA+"/check-runs?per_page=100", &nativePages); err != nil {
@@ -337,7 +347,7 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 	}
 
 	checks := make([]scm.Check, 0)
-	observedRequired := map[string]bool{}
+	observedRequired := map[requiredStatusCheck]bool{}
 	for _, native := range nativePages {
 		for _, run := range native.CheckRuns {
 			bucket := normalizeCheckBucket("", run.Status)
@@ -351,8 +361,10 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 				Name: run.Name, Bucket: bucket,
 				CompletedAt: parseGitHubTime(run.CompletedAt), Source: scm.CheckSourceNative, BlocksPending: true,
 			})
-			if run.Name != "" {
-				observedRequired[run.Name] = true
+			for requirement := range required {
+				if requirement.Context == run.Name && (!requirement.AppBound || requirement.AppID == run.App.ID) {
+					observedRequired[requirement] = true
+				}
 			}
 		}
 	}
@@ -363,10 +375,14 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 				continue
 			}
 			seen[status.Context] = true // GitHub returns latest statuses first.
-			observedRequired[status.Context] = true
+			for requirement := range required {
+				if requirement.Context == status.Context && !requirement.AppBound {
+					observedRequired[requirement] = true
+				}
+			}
 			bucket := normalizeCheckBucket("", status.State)
 			blocksPending := true
-			if bucket == scm.CheckBucketPending && policyKnown && status.TargetURL == "" && !required[status.Context] {
+			if bucket == scm.CheckBucketPending && policyKnown && status.TargetURL == "" && !hasRequiredContext(required, status.Context) {
 				blocksPending = false
 			}
 			checks = append(checks, scm.Check{
@@ -376,16 +392,24 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 		}
 	}
 	if policyKnown {
-		missingRequired := make([]string, 0)
-		for context := range required {
-			if !observedRequired[context] {
-				missingRequired = append(missingRequired, context)
+		missingRequired := make([]requiredStatusCheck, 0)
+		for requirement := range required {
+			if !observedRequired[requirement] {
+				missingRequired = append(missingRequired, requirement)
 			}
 		}
-		sort.Strings(missingRequired)
-		for _, context := range missingRequired {
+		sort.Slice(missingRequired, func(i, j int) bool {
+			if missingRequired[i].Context != missingRequired[j].Context {
+				return missingRequired[i].Context < missingRequired[j].Context
+			}
+			if missingRequired[i].AppBound != missingRequired[j].AppBound {
+				return !missingRequired[i].AppBound
+			}
+			return missingRequired[i].AppID < missingRequired[j].AppID
+		})
+		for _, requirement := range missingRequired {
 			checks = append(checks, scm.Check{
-				Name: context, Bucket: scm.CheckBucketPending,
+				Name: requiredStatusCheckName(requirement), Bucket: scm.CheckBucketPending,
 				Source: scm.CheckSourceUnknown, BlocksPending: true,
 			})
 		}
@@ -470,26 +494,53 @@ func parseGitHubTime(value string) time.Time {
 	return parsed
 }
 
-func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) (map[string]bool, bool) {
-	required := map[string]bool{}
+func requiredStatusCheckName(check requiredStatusCheck) string {
+	if !check.AppBound {
+		return check.Context
+	}
+	return fmt.Sprintf("%s (GitHub App %d)", check.Context, check.AppID)
+}
+
+func hasRequiredContext(required map[requiredStatusCheck]bool, context string) bool {
+	for check := range required {
+		if check.Context == context {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) (map[requiredStatusCheck]bool, bool) {
+	required := map[requiredStatusCheck]bool{}
+	addRequired := func(context string, appID *int64) {
+		if context == "" {
+			return
+		}
+		check := requiredStatusCheck{Context: context}
+		if appID != nil && *appID >= 0 {
+			check.AppID = *appID
+			check.AppBound = true
+		}
+		required[check] = true
+	}
 	var protection struct {
 		Contexts []string `json:"contexts"`
 		Checks   []struct {
 			Context string `json:"context"`
+			AppID   *int64 `json:"app_id"`
 		} `json:"checks"`
 	}
-	if err := h.apiJSON(ctx, "repos/"+repo+"/branches/"+branch+"/protection/required_status_checks", &protection); err != nil {
+	escapedBranch := url.PathEscape(branch)
+	if err := h.apiJSON(ctx, "repos/"+repo+"/branches/"+escapedBranch+"/protection/required_status_checks", &protection); err != nil {
 		if !isUnprotectedBranchError(err) {
 			return nil, false
 		}
 	} else {
 		for _, context := range protection.Contexts {
-			required[context] = true
+			addRequired(context, nil)
 		}
 		for _, check := range protection.Checks {
-			if check.Context != "" {
-				required[check.Context] = true
-			}
+			addRequired(check.Context, check.AppID)
 		}
 	}
 
@@ -497,11 +548,12 @@ func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) 
 		Type       string `json:"type"`
 		Parameters struct {
 			RequiredStatusChecks []struct {
-				Context string `json:"context"`
+				Context       string `json:"context"`
+				IntegrationID *int64 `json:"integration_id"`
 			} `json:"required_status_checks"`
 		} `json:"parameters"`
 	}
-	if err := h.apiJSONPages(ctx, "repos/"+repo+"/rules/branches/"+branch, &rulePages); err != nil {
+	if err := h.apiJSONPages(ctx, "repos/"+repo+"/rules/branches/"+escapedBranch, &rulePages); err != nil {
 		return nil, false
 	}
 	for _, rules := range rulePages {
@@ -513,9 +565,7 @@ func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) 
 				continue
 			}
 			for _, check := range rule.Parameters.RequiredStatusChecks {
-				if check.Context != "" {
-					required[check.Context] = true
-				}
+				addRequired(check.Context, check.IntegrationID)
 			}
 		}
 	}
