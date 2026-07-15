@@ -29,6 +29,15 @@ const (
 	ciChecksRunningMsg  = cimonitor.ChecksRunningMsg
 )
 
+type prHeadReceipt uint8
+
+const (
+	prHeadReceiptUnavailable prHeadReceipt = iota
+	prHeadReceiptUnknown
+	prHeadReceiptMatches
+	prHeadReceiptDrifted
+)
+
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, auto-fixing CI failures.
 type CIStep struct {
@@ -192,6 +201,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	timeoutFailingChecks := []string{}
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
+	headDriftLogged := false
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
@@ -252,142 +262,167 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			sctx.Log("PR has been closed")
 			return &pipeline.StepOutcome{}, nil
 		}
-		receiptMatchesHead, headErr := prHeadMatchesRun(ctx, host, pr, sctx.Run.HeadSHA)
+		receipt, headErr := prHeadReceiptForRun(ctx, host, pr, sctx.Run.HeadSHA)
 		if headErr != nil {
 			sctx.Log(fmt.Sprintf("warning: could not check PR head: %v", headErr))
 		}
-
-		// Check mergeable state if the provider supports it
-		mergeConflict := false
-		mergeabilityKnown := true
-		if host.Capabilities().MergeableState {
-			mergeState, mergeErr := host.GetMergeableState(ctx, pr)
-			if mergeErr != nil {
-				sctx.Log(fmt.Sprintf("warning: could not check mergeable state: %v", mergeErr))
-				mergeabilityBlockedReason = ""
-				mergeabilityKnown = false
-			} else {
-				mergeConflict = mergeState.Conflict()
-				mergeabilityKnown = mergeState.Resolved()
-				if !mergeabilityKnown {
-					sctx.Log(fmt.Sprintf("mergeable state still pending: %s", mergeState))
-					mergeabilityBlockedReason = fmt.Sprintf("PR mergeability remained unresolved before timeout: %s", mergeState)
-				} else {
-					mergeabilityBlockedReason = ""
-					timeoutMergeConflict = mergeConflict
-				}
+		headDrifted := receipt == prHeadReceiptDrifted
+		if headDrifted {
+			timeoutFailingChecks = timeoutFailingChecks[:0]
+			timeoutMergeConflict = false
+			mergeabilityBlockedReason = ""
+			lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+			if !headDriftLogged {
+				sctx.Log("PR head changed since this run started; waiting for a matching receipt")
+				headDriftLogged = true
 			}
+		} else {
+			headDriftLogged = false
 		}
 
-		// Check CI status - wait for all checks to complete before fixing
-		ciFixLimit := sctx.Config.AutoFix.CI
-		checks, err := host.GetChecks(ctx, pr)
-		if err != nil {
-			lastMonitorLog = ""
-			sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
-		} else {
-			pending := hasPendingChecks(checks)
-			failing := failingCheckNames(checks)
-			sort.Strings(failing)
-			hasFailures := len(failing) > 0
-			hasIssues := hasFailures || mergeConflict
-			timeoutFailingChecks = append(timeoutFailingChecks[:0], failing...)
+		if !headDrifted {
 
-			// If a failing check completed after our last fix push, CI has
-			// already re-run since we pushed (possibly too fast to observe
-			// as pending between polls). Treat this as a new iteration so
-			// the retry path can fire rather than looping on "fix already
-			// attempted" until timeout.
-			if failingCheckCompletedAfter(checks, s.lastFixedCompletedAt) {
-				s.lastFixedChecks = ""
-				s.lastFixedCompletedAt = nil
+			// Check mergeable state if the provider supports it
+			mergeConflict := false
+			mergeabilityKnown := true
+			if host.Capabilities().MergeableState {
+				mergeState, mergeErr := host.GetMergeableState(ctx, pr)
+				if mergeErr != nil {
+					sctx.Log(fmt.Sprintf("warning: could not check mergeable state: %v", mergeErr))
+					mergeabilityBlockedReason = ""
+					mergeabilityKnown = false
+				} else {
+					mergeConflict = mergeState.Conflict()
+					mergeabilityKnown = mergeState.Resolved()
+					if !mergeabilityKnown {
+						sctx.Log(fmt.Sprintf("mergeable state still pending: %s", mergeState))
+						mergeabilityBlockedReason = fmt.Sprintf("PR mergeability remained unresolved before timeout: %s", mergeState)
+					} else {
+						mergeabilityBlockedReason = ""
+						timeoutMergeConflict = mergeConflict
+					}
+				}
 			}
 
-			if hasIssues && pending {
+			// Check CI status - wait for all checks to complete before fixing
+			ciFixLimit := sctx.Config.AutoFix.CI
+			checks, err := host.GetChecks(ctx, pr)
+			if err != nil {
 				lastMonitorLog = ""
-				if pendingCheckMatchesLastFixed(checks, s.lastFixedChecks) {
+				sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
+			} else {
+				pending := hasPendingChecks(checks)
+				failing := failingCheckNames(checks)
+				sort.Strings(failing)
+				hasFailures := len(failing) > 0
+				hasIssues := hasFailures || mergeConflict
+				timeoutFailingChecks = append(timeoutFailingChecks[:0], failing...)
+
+				// If a failing check completed after our last fix push, CI has
+				// already re-run since we pushed (possibly too fast to observe
+				// as pending between polls). Treat this as a new iteration so
+				// the retry path can fire rather than looping on "fix already
+				// attempted" until timeout.
+				if failingCheckCompletedAfter(checks, s.lastFixedCompletedAt) {
 					s.lastFixedChecks = ""
 					s.lastFixedCompletedAt = nil
 				}
-				sctx.Log("issues detected but checks still pending, waiting for all checks to complete...")
-			} else if hasIssues {
-				lastMonitorLog = ""
-				// All checks done, issues present - fix or report
-				fixKey := encodeLastFixedChecks(failing, mergeConflict)
-				fixCompletedAt := failingCheckCompletionTimes(checks)
-				issueDesc := strings.Join(failing, ", ")
-				if mergeConflict {
-					if issueDesc != "" {
-						issueDesc += " + merge conflict"
-					} else {
-						issueDesc = "merge conflict"
-					}
-				}
-				if sctx.Fixing && !manualFixAttempted {
-					manualFixAttempted = true
-					sctx.Log(fmt.Sprintf("issues detected: %s - manual fix requested...", issueDesc))
-					previousHeadSHA := sctx.Run.HeadSHA
-					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
-					if err != nil {
-						sctx.Log(fmt.Sprintf("warning: CI manual fix failed: %v", err))
-					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
-						s.lastFixedChecks = fixKey
-						s.lastFixedCompletedAt = fixCompletedAt
-					} else {
-						sctx.Log("CI fix produced no changes, returning for manual intervention...")
-						return ciFailureOutcome(failing, mergeConflict, "CI fix produced no changes - failures require manual intervention"), nil
-					}
-				} else if sctx.Fixing && fixKey == s.lastFixedChecks {
-					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
-				} else if ciFixLimit <= 0 {
-					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fix disabled, waiting for manual intervention...", issueDesc))
-					return ciFailureOutcome(failing, mergeConflict, "CI failures require manual intervention"), nil
-				} else if s.ciFixAttempts >= ciFixLimit {
-					sctx.Log(fmt.Sprintf("issues detected: %s - max auto-fix attempts (%d) reached, waiting for manual intervention...", issueDesc, ciFixLimit))
-					return ciFailureOutcome(failing, mergeConflict, "CI failures still present after auto-fix attempts"), nil
-				} else if fixKey == s.lastFixedChecks {
-					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
-				} else {
-					s.ciFixAttempts++
-					sctx.Log(fmt.Sprintf("issues detected: %s - auto-fixing (attempt %d/%d)...", issueDesc, s.ciFixAttempts, ciFixLimit))
-					previousHeadSHA := sctx.Run.HeadSHA
-					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
-					if err != nil {
-						sctx.Log(fmt.Sprintf("warning: CI auto-fix failed: %v", err))
-					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
-						s.lastFixedChecks = fixKey
-						s.lastFixedCompletedAt = fixCompletedAt
-					} else {
-						// No changes produced - don't set lastFixedChecks so next
-						// poll treats this as a new failure and retries if attempts remain.
-						sctx.Log("CI fix produced no changes, will retry if attempts remain...")
-					}
-				}
-			} else {
-				s.lastFixedChecks = ""
-				s.lastFixedCompletedAt = nil
-				switch {
-				case !prStateKnown || !mergeabilityKnown:
+
+				if hasIssues && pending {
 					lastMonitorLog = ""
-				case pending:
-					// Checks are (re-)running with no failures yet. Surface this
-					// so a PR that passed checks and starts re-running clears the
-					// previous passed-checks signal instead of looking stale.
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
-				case len(checks) == 0 && elapsed < s.gracePeriod():
-					// CI checks may not be registered yet, keep polling.
-					lastMonitorLog = ""
-					sctx.Log("no CI checks reported yet, waiting for checks to register...")
-				case len(checks) == 0:
-					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
-				default:
-					if receiptMatchesHead {
-						receiptMatchesHead, _ = prHeadMatchesRun(ctx, host, pr, sctx.Run.HeadSHA)
+					if pendingCheckMatchesLastFixed(checks, s.lastFixedChecks) {
+						s.lastFixedChecks = ""
+						s.lastFixedCompletedAt = nil
 					}
-					if !receiptMatchesHead {
+					sctx.Log("issues detected but checks still pending, waiting for all checks to complete...")
+				} else if hasIssues {
+					if receipt == prHeadReceiptMatches {
+						receipt, headErr = prHeadReceiptForRun(ctx, host, pr, sctx.Run.HeadSHA)
+						if headErr != nil {
+							sctx.Log(fmt.Sprintf("warning: could not check PR head: %v", headErr))
+						}
+					}
+					if receipt == prHeadReceiptDrifted || receipt == prHeadReceiptUnknown {
+						timeoutFailingChecks = timeoutFailingChecks[:0]
+						timeoutMergeConflict = false
 						lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+						if receipt == prHeadReceiptDrifted && !headDriftLogged {
+							sctx.Log("PR head changed since this run started; waiting for a matching receipt")
+							headDriftLogged = true
+						}
 					} else {
-						lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+						lastMonitorLog = ""
+						// All checks done, issues present - fix or report
+						fixKey := encodeLastFixedChecks(failing, mergeConflict)
+						fixCompletedAt := failingCheckCompletionTimes(checks)
+						issueDesc := strings.Join(failing, ", ")
+						if mergeConflict {
+							if issueDesc != "" {
+								issueDesc += " + merge conflict"
+							} else {
+								issueDesc = "merge conflict"
+							}
+						}
+						if sctx.Fixing && !manualFixAttempted {
+							manualFixAttempted = true
+							sctx.Log(fmt.Sprintf("issues detected: %s - manual fix requested...", issueDesc))
+							previousHeadSHA := sctx.Run.HeadSHA
+							pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
+							if err != nil {
+								sctx.Log(fmt.Sprintf("warning: CI manual fix failed: %v", err))
+							} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
+								s.lastFixedChecks = fixKey
+								s.lastFixedCompletedAt = fixCompletedAt
+							} else {
+								sctx.Log("CI fix produced no changes, returning for manual intervention...")
+								return ciFailureOutcome(failing, mergeConflict, "CI fix produced no changes - failures require manual intervention"), nil
+							}
+						} else if sctx.Fixing && fixKey == s.lastFixedChecks {
+							sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
+						} else if ciFixLimit <= 0 {
+							sctx.Log(fmt.Sprintf("issues detected: %s - auto-fix disabled, waiting for manual intervention...", issueDesc))
+							return ciFailureOutcome(failing, mergeConflict, "CI failures require manual intervention"), nil
+						} else if s.ciFixAttempts >= ciFixLimit {
+							sctx.Log(fmt.Sprintf("issues detected: %s - max auto-fix attempts (%d) reached, waiting for manual intervention...", issueDesc, ciFixLimit))
+							return ciFailureOutcome(failing, mergeConflict, "CI failures still present after auto-fix attempts"), nil
+						} else if fixKey == s.lastFixedChecks {
+							sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
+						} else {
+							s.ciFixAttempts++
+							sctx.Log(fmt.Sprintf("issues detected: %s - auto-fixing (attempt %d/%d)...", issueDesc, s.ciFixAttempts, ciFixLimit))
+							previousHeadSHA := sctx.Run.HeadSHA
+							pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
+							if err != nil {
+								sctx.Log(fmt.Sprintf("warning: CI auto-fix failed: %v", err))
+							} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
+								s.lastFixedChecks = fixKey
+								s.lastFixedCompletedAt = fixCompletedAt
+							} else {
+								// No changes produced - don't set lastFixedChecks so next
+								// poll treats this as a new failure and retries if attempts remain.
+								sctx.Log("CI fix produced no changes, will retry if attempts remain...")
+							}
+						}
+					}
+				} else {
+					s.lastFixedChecks = ""
+					s.lastFixedCompletedAt = nil
+					switch {
+					case !prStateKnown || !mergeabilityKnown:
+						lastMonitorLog = ""
+					case pending:
+						// Checks are (re-)running with no failures yet. Surface this
+						// so a PR that passed checks and starts re-running clears the
+						// previous passed-checks signal instead of looking stale.
+						lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+					case len(checks) == 0 && elapsed < s.gracePeriod():
+						// CI checks may not be registered yet, keep polling.
+						lastMonitorLog = ""
+						sctx.Log("no CI checks reported yet, waiting for checks to register...")
+					case len(checks) == 0:
+						lastMonitorLog = logCIMonitorHandoff(sctx, ctx, host, pr, ciNoChecksPassedMsg, lastMonitorLog)
+					default:
+						lastMonitorLog = logCIMonitorHandoff(sctx, ctx, host, pr, ciChecksPassedMsg, lastMonitorLog)
 					}
 				}
 			}
@@ -421,17 +456,31 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 }
 
-func prHeadMatchesRun(ctx context.Context, host scm.Host, pr *scm.PR, runHead string) (bool, error) {
+func prHeadReceiptForRun(ctx context.Context, host scm.Host, pr *scm.PR, runHead string) (prHeadReceipt, error) {
 	resolver, ok := host.(scm.PRHeadResolver)
 	if !ok {
-		return true, nil
+		return prHeadReceiptUnavailable, nil
 	}
 	liveHead, err := resolver.GetPRHead(ctx, pr)
 	if err != nil {
-		return false, err
+		return prHeadReceiptUnknown, err
 	}
 	pr.HeadSHA = liveHead
-	return liveHead != "" && runHead != "" && strings.EqualFold(liveHead, runHead), nil
+	if liveHead != "" && runHead != "" && strings.EqualFold(liveHead, runHead) {
+		return prHeadReceiptMatches, nil
+	}
+	return prHeadReceiptDrifted, nil
+}
+
+func logCIMonitorHandoff(sctx *pipeline.StepContext, ctx context.Context, host scm.Host, pr *scm.PR, message, previous string) string {
+	receipt, err := prHeadReceiptForRun(ctx, host, pr, sctx.Run.HeadSHA)
+	if err != nil {
+		sctx.Log(fmt.Sprintf("warning: could not check PR head: %v", err))
+	}
+	if receipt != prHeadReceiptMatches {
+		return logCIMonitorStatus(sctx, ciChecksRunningMsg, previous)
+	}
+	return logCIMonitorStatus(sctx, message, previous)
 }
 
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {

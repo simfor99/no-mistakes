@@ -14,7 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 )
 
-func TestCIStep_GitLabPassesWhenJobsPass(t *testing.T) {
+func TestCIStep_GitLabPassesWithoutHandoffProvenance(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -46,15 +46,18 @@ func TestCIStep_GitLabPassesWhenJobsPass(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected passing GitLab CI to keep monitoring while MR is open, got %v", err)
 	}
-	found := false
+	foundRunning := false
 	for _, line := range logs {
-		if strings.Contains(line, "all CI checks passed - still monitoring until merged or closed") {
-			found = true
+		if line == ciChecksPassedMsg || line == ciNoChecksPassedMsg {
+			t.Fatalf("GitLab without head provenance must not emit a handoff: %v", logs)
+		}
+		if line == ciChecksRunningMsg {
+			foundRunning = true
 			break
 		}
 	}
-	if !found {
-		t.Fatalf("expected passing CI log, got: %v", logs)
+	if !foundRunning {
+		t.Fatalf("expected continued-monitoring status, got: %v", logs)
 	}
 }
 
@@ -281,14 +284,17 @@ func TestCIStep_GitLabPendingChecksKeepMonitoringWhenDone(t *testing.T) {
 	if pollCount != 2 {
 		t.Fatalf("expected one pending wait plus one healthy monitoring wait, got %d", pollCount)
 	}
-	found := false
+	foundRunning := false
 	for _, line := range logs {
-		if strings.Contains(line, "all CI checks passed - still monitoring until merged or closed") {
-			found = true
+		if line == ciChecksPassedMsg || line == ciNoChecksPassedMsg {
+			t.Fatalf("GitLab without head provenance must not emit a handoff: %v", logs)
+		}
+		if line == ciChecksRunningMsg {
+			foundRunning = true
 			break
 		}
 	}
-	if !found {
-		t.Fatalf("expected continued-monitoring pass log, got: %v", logs)
+	if !foundRunning {
+		t.Fatalf("expected continued-monitoring status, got: %v", logs)
 	}
 }

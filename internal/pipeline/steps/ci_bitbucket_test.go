@@ -16,7 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
-func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
+func TestCIStep_BitbucketPassesWithoutHandoffProvenance(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"SUCCESSFUL"}]}`)
@@ -52,17 +52,20 @@ func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
 	if api.statusesCalls == 0 {
 		t.Fatal("expected Bitbucket statuses endpoint to be called")
 	}
-	foundPassed := false
+	foundRunning := false
 	for _, line := range logs {
 		if strings.Contains(line, "ready to merge") {
 			t.Fatalf("expected Bitbucket CI logs not to imply mergeability, got %v", logs)
 		}
-		if strings.Contains(line, "all CI checks passed - still monitoring until merged or closed") {
-			foundPassed = true
+		if line == ciChecksPassedMsg || line == ciNoChecksPassedMsg {
+			t.Fatalf("Bitbucket without head provenance must not emit a handoff: %v", logs)
+		}
+		if line == ciChecksRunningMsg {
+			foundRunning = true
 		}
 	}
-	if !foundPassed {
-		t.Fatalf("expected successful Bitbucket CI logs, got %v", logs)
+	if !foundRunning {
+		t.Fatalf("expected continued-monitoring status, got %v", logs)
 	}
 }
 
