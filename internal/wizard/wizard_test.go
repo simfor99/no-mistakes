@@ -1128,3 +1128,27 @@ func TestWaitForRun_CalledAfterPush(t *testing.T) {
 		t.Fatal("expected pushed result to remain true")
 	}
 }
+
+func TestSuggestionTimeout(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "default", want: defaultSuggestionTimeout},
+		{name: "configured", value: "240s", want: 240 * time.Second},
+		{name: "whitespace", value: " 90s ", want: 90 * time.Second},
+		{name: "invalid", value: "later", want: defaultSuggestionTimeout},
+		{name: "zero", value: "0s", want: defaultSuggestionTimeout},
+		{name: "negative", value: "-1s", want: defaultSuggestionTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("NO_MISTAKES_WIZARD_AGENT_TIMEOUT", tt.value)
+			if got := suggestionTimeout(); got != tt.want {
+				t.Fatalf("suggestionTimeout() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}

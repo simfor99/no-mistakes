@@ -63,6 +63,8 @@ const (
 	stepPush
 )
 
+const defaultSuggestionTimeout = 60 * time.Second
+
 // stepStatus is the visual + logical state of a single step.
 type stepStatus int
 
@@ -652,9 +654,22 @@ func (m *Model) scheduleSpinner() tea.Cmd {
 	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinnerTickMsg{} })
 }
 
+func suggestionTimeout() time.Duration {
+	value := strings.TrimSpace(os.Getenv("NO_MISTAKES_WIZARD_AGENT_TIMEOUT"))
+	if value == "" {
+		return defaultSuggestionTimeout
+	}
+
+	timeout, err := time.ParseDuration(value)
+	if err != nil || timeout <= 0 {
+		return defaultSuggestionTimeout
+	}
+	return timeout
+}
+
 func (m Model) suggestCmd(id stepID) tea.Cmd {
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(m.ctx, 60*time.Second)
+		ctx, cancel := context.WithTimeout(m.ctx, suggestionTimeout())
 		defer cancel()
 		switch id {
 		case stepBranch:
@@ -764,7 +779,7 @@ func RunAuto(cfg Config) (Result, error) {
 			res.Err = err
 			return res, err
 		}
-		suggestCtx, suggestCancel := context.WithTimeout(ctx, 60*time.Second)
+		suggestCtx, suggestCancel := context.WithTimeout(ctx, suggestionTimeout())
 		branch, err := cfg.SuggestBranch(suggestCtx)
 		suggestCancel()
 		if err != nil {
@@ -793,7 +808,7 @@ func RunAuto(cfg Config) (Result, error) {
 			res.Err = err
 			return res, err
 		}
-		suggestCtx, suggestCancel := context.WithTimeout(ctx, 60*time.Second)
+		suggestCtx, suggestCancel := context.WithTimeout(ctx, suggestionTimeout())
 		commitMsg, err := cfg.SuggestCommit(suggestCtx)
 		suggestCancel()
 		if err != nil {
