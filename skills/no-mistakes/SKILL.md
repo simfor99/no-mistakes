@@ -162,11 +162,14 @@ Run the pipeline and decide on its findings as they come up:
 3. Repeat step 2 until the output has an `outcome:` instead of a `gate:`. The
    outcomes are:
    - `checks-passed` - the change is validated and CI is green, but the PR is
-     not merged yet. **You are done driving the pipeline.** Do not wait for the
-     merge: tell the user the PR is ready and ask them to review and merge it
-     (the PR link is in the `help` line). no-mistakes keeps monitoring the PR
-     in the background until it is merged, closed, or its configured idle
-     timeout elapses, so a human can watch it in the TUI.
+     not merged yet. If the calling workflow explicitly confirms merge authority,
+     keep the active agent turn open, perform external review triage, and verify a
+     fresh exact-head receipt before invoking that workflow's authorized merge
+     contract. Green CI alone never grants merge authority. Otherwise report that
+     the PR is ready and ask the user to decide whether to merge (the PR link is in
+     the `help` line). no-mistakes keeps monitoring the PR in the background
+     until it is merged, closed, or its configured idle timeout elapses, so a human
+     can watch it in the TUI.
    - `passed` - the changes cleared the gate and the PR was merged or closed.
    - `failed` or `cancelled` - they did not; read the output and address it.
      Fix whatever the output points at (a failing test, a lint error, a finding

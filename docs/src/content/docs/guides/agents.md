@@ -143,7 +143,7 @@ Re-run `no-mistakes init` after an upgrade to refresh that skill, including over
 Older versions vendored the skill into each initialized repo's `.claude/skills` and `.agents/skills`; those copies are no longer needed, and `init` prints a notice when it finds one so you can remove it.
 The skill drives `no-mistakes axi`, a non-interactive command surface that prints TOON to stdout and progress to stderr.
 When CI is green but the PR is still open, `axi run` and `axi respond` return `outcome: checks-passed` with a help line pointing at the PR instead of waiting for a human merge.
-That is a successful agent stopping point: report that the PR is ready and ask the user to review and merge it.
+If the calling workflow explicitly confirms merge authority, keep the active agent turn open, perform external review triage, and verify a fresh exact-head receipt before invoking that workflow's authorized merge contract. Green CI alone never grants merge authority. Otherwise report that the PR is ready and ask the user to decide whether to merge.
 Successful outcomes also instruct the agent to summarize the run for the user.
 When the pipeline applied fixes, successful outcomes include a `fixes` table listing each fix so the agent can acknowledge what it missed and the user can review them.
 

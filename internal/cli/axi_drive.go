@@ -532,13 +532,13 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 	// and asks the user to review and merge instead of waiting.
 	if ciReady {
 		fields = append(fields, toon.Field{Key: "outcome", Value: "checks-passed"})
-		merge := "CI checks passed - the PR is ready. Ask the user to review and merge it."
+		merge := "CI checks passed - the PR is ready for the next authorized handoff."
 		if rv.PRURL != "" {
-			merge = fmt.Sprintf("CI checks passed - the PR is ready. Ask the user to review and merge it: %s", rv.PRURL)
+			merge = fmt.Sprintf("CI checks passed - the PR is ready for the next authorized handoff: %s", rv.PRURL)
 		}
 		fixes := rv.fixRows()
 		fields = appendFixesField(fields, fixes)
-		help := append([]string{merge}, successReportHelp(fixes)...)
+		help := append([]string{merge, checksPassedHandoffGuidance}, successReportHelp(fixes)...)
 		help = append(help, staleMonitorGuidance)
 		fields = append(fields, toon.Field{Key: "help", Value: help})
 		emitDoc(cmd, fields...)

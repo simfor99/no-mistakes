@@ -32,6 +32,38 @@ var canonicalPreserveGateFixPhrases = []string{
 	"already-resolved findings do not re-surface",
 }
 
+var canonicalChecksPassedHandoffPhrases = []string{
+	"explicitly confirms merge authority",
+	"Green CI alone never grants merge authority",
+	"fresh exact-head receipt",
+	"external review triage",
+}
+
+func TestChecksPassedHandoffGuidance_SyncedAcrossSurfaces(t *testing.T) {
+	surfaces := map[string]string{
+		"skill body":      skill.Markdown(),
+		"agents guide":    readAgentsGuide(t),
+		"CLI reference":   readCLIReference(t),
+		"axi help string": checksPassedHandoffGuidance,
+	}
+	for name, content := range surfaces {
+		for _, phrase := range canonicalChecksPassedHandoffPhrases {
+			if !strings.Contains(content, phrase) {
+				t.Errorf("%s is missing the canonical checks-passed handoff phrase %q", name, phrase)
+			}
+		}
+	}
+}
+
+func TestChecksPassedHandoffGuidance_InChecksPassedOutput(t *testing.T) {
+	got := renderDriveResultForGuidanceTest(t, true, types.RunRunning)
+	for _, phrase := range canonicalChecksPassedHandoffPhrases {
+		if !strings.Contains(got, phrase) {
+			t.Errorf("checks-passed output missing handoff phrase %q in:\n%s", phrase, got)
+		}
+	}
+}
+
 // TestStaleMonitorGuidance_SyncedAcrossSurfaces guards the repo invariant that
 // agent-driving guidance stays in sync across its three surfaces: the skill
 // body, the published agents guide, and the live axi help string. The earlier
@@ -159,6 +191,16 @@ func readAgentsGuide(t *testing.T) string {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read agents guide %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func readCLIReference(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "docs", "src", "content", "docs", "reference", "cli.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read CLI reference %s: %v", path, err)
 	}
 	return string(data)
 }

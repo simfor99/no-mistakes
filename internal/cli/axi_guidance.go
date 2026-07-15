@@ -22,3 +22,8 @@ const staleMonitorGuidance = "If this PR later falls behind the default branch o
 // body and the published agents guide, with CLI-reference coverage in
 // docs/.../reference/cli.md.
 const preserveGateFixCommitsGuidance = "When you make an additional fix after a gate round has already produced fix commits, commit it on top of the existing branch and run `no-mistakes axi run --intent \"...\"` with the original user intent. Never abort-and-restart, reset the branch, or open a new branch in a way that drops prior gate-fix commits. A fresh run re-validates the branch's current state, so already-resolved findings do not re-surface."
+
+// checksPassedHandoffGuidance keeps `checks-passed` useful to both ordinary
+// agents and higher-level drivers without making green CI an implicit merge
+// permission. The caller owns authority; AXI only supplies the handoff.
+const checksPassedHandoffGuidance = "If the calling workflow explicitly confirms merge authority, keep the active agent turn open, perform external review triage, and verify a fresh exact-head receipt before invoking that workflow's authorized merge contract. Green CI alone never grants merge authority. Otherwise report that the PR is ready and ask the user to decide whether to merge."
