@@ -161,18 +161,21 @@ Agents can also call `no-mistakes axi` directly:
 ```sh
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi status
+no-mistakes axi watch --run <id> --until attention
 no-mistakes axi respond --action approve
 no-mistakes axi logs --step review --full
 no-mistakes axi abort
 no-mistakes axi abort --run <id>
 ```
 
+In an active agent session, `no-mistakes axi watch --run <id> --until attention` is the foreground alternative to repeated status polls. It returns at a gate, quiet signal, terminal result, or `checks-passed` handoff. It keeps only the current active agent turn open; it does not resume a closed session or install a supervisor.
+
 When an agent makes an additional fix after a gate round has already produced fix commits - a newly surfaced finding, a reviewer or pre-merge request, or any other post-completion change - it should commit the fix on top of the existing branch and run `no-mistakes axi run --intent "..."` with the original user intent.
 Never abort-and-restart, reset the branch, or open a new branch in a way that drops prior gate-fix commits, including the pipeline's own `no-mistakes(review|document|lint): ...` commits.
 A fresh run re-validates the branch's current state, so already-resolved findings do not re-surface.
 
 The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, or relay `ask-user` findings, and how to interpret `axi status` fields like `awaiting_agent` and `active_steps` - is owned by the skill itself and by the live `axi` output.
-Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
+Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help`, `no-mistakes axi respond --help`, and `no-mistakes axi watch --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
 The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 
 ## Binary resolution

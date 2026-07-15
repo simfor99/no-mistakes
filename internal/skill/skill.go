@@ -140,6 +140,11 @@ Run the pipeline and decide on its findings as they come up:
    needs to, but the run **never advances past a gate on its own**. Read every
    return; on a ` + "`gate:`" + `, respond; loop until an ` + "`outcome:`" + `. Never idle-wait
    for the run to move forward by itself.
+
+   In an active agent session, ` + "`no-mistakes axi watch --run <id> --until attention`" + ` is the
+   foreground alternative to repeated status polls. It returns at a gate, quiet
+   signal, terminal result, or ` + "`checks-passed`" + ` handoff. It keeps only the current active
+   agent turn open; it does not resume a closed session or install a supervisor.
    When that status output includes ` + "`awaiting_agent: parked <duration>`" + ` under the run,
    the run is parked at an approval or fix-review gate and waiting for you to
    send ` + "`axi respond`" + `. The field is observability only: it does not change

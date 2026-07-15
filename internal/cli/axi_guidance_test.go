@@ -55,6 +55,23 @@ func TestChecksPassedHandoffGuidance_SyncedAcrossSurfaces(t *testing.T) {
 	}
 }
 
+func TestWatchGuidance_IsDiscoverableAcrossPublicSurfaces(t *testing.T) {
+	for name, content := range map[string]string{
+		"skill body":    skill.Markdown(),
+		"agents guide":  readAgentsGuide(t),
+		"CLI reference": readCLIReference(t),
+	} {
+		for _, phrase := range []string{
+			"no-mistakes axi watch --run <id> --until attention",
+			"active agent turn",
+		} {
+			if !strings.Contains(content, phrase) {
+				t.Errorf("%s is missing watch guidance phrase %q", name, phrase)
+			}
+		}
+	}
+}
+
 func TestChecksPassedHandoffGuidance_InChecksPassedOutput(t *testing.T) {
 	got := renderDriveResultForGuidanceTest(t, true, types.RunRunning)
 	for _, phrase := range canonicalChecksPassedHandoffPhrases {

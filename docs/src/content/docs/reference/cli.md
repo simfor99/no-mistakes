@@ -139,6 +139,22 @@ If it returns another `gate:`, answer that gate; do not idle-wait for the run to
 When the daemon is already running, `axi respond` can continue an active run even if the global config file has become invalid, because it is not starting a fresh run.
 The same successful-output reporting instructions apply to `axi respond` results.
 
+## no-mistakes axi watch
+
+Keep one active agent turn in the foreground until a run needs attention or ends. The command reads the existing run and daemon; it does not start a daemon, mutate the run, or resume a closed session.
+
+```sh
+no-mistakes axi watch --run <id> --until attention
+no-mistakes axi watch --run <id> --until terminal
+```
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--run` | `string` | (none) | Run ID to watch; required |
+| `--until` | `string` | `attention` | `attention` stops at a gate, quiet signal, terminal result, or `checks-passed`; `terminal` keeps waiting through quiet signals |
+
+For `--until attention`, only a CI-ready handoff returns the top-level `outcome: checks-passed`. Gate and quiet stops are attention signals, never merge authority. A terminal stop preserves the terminal outcome and any recorded error. `head_sha` is the full stored run SHA; use it with fresh GitHub and local Git values for an exact-head receipt, not as authority to merge.
+
 ## no-mistakes axi status
 
 Show a run, preferring the current branch's active or most recent run before falling back to repo-wide active or recent runs.
