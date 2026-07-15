@@ -194,6 +194,9 @@ func renderWatchResult(cmd *cobra.Command, rv runView, reason string) error {
 		fields = append(fields, toon.Field{Key: "outcome", Value: "checks-passed"})
 	} else if terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "outcome", Value: outcomeFor(rv.Status)})
+		if rv.Error != "" {
+			fields = append(fields, toon.Field{Key: "error", Value: rv.Error})
+		}
 	}
 	emitDoc(cmd, fields...)
 	if rv.Status == "failed" || rv.Status == "cancelled" {

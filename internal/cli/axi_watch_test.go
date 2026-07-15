@@ -49,3 +49,25 @@ func TestRenderWatchResultDoesNotInventMergeOutcome(t *testing.T) {
 		})
 	}
 }
+
+func TestRenderWatchResultPreservesTerminalError(t *testing.T) {
+	cmd := &cobra.Command{}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	err := renderWatchResult(cmd, runView{
+		ID:     "run-1",
+		Status: string(types.RunFailed),
+		Error:  "CI workflow failed",
+	}, "terminal")
+	if err == nil {
+		t.Fatal("renderWatchResult() error = nil, want non-zero terminal error")
+	}
+
+	got := out.String()
+	for _, want := range []string{"stop: terminal", "outcome: failed", "error: CI workflow failed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("terminal watch output missing %q in:\n%s", want, got)
+		}
+	}
+}
