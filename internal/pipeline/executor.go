@@ -540,6 +540,20 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	if e.config != nil {
 		autoFixLimit = e.config.AutoFixLimit(stepName)
 	}
+	var reviewGuard *ReviewProgressGuard
+	if stepName == types.StepReview {
+		noProgressTimeout := config.DefaultReviewNoProgressTimeout
+		maxDuration := config.DefaultReviewMaxDuration
+		if e.config != nil {
+			if e.config.ReviewNoProgressTimeout > 0 {
+				noProgressTimeout = e.config.ReviewNoProgressTimeout
+			}
+			if e.config.ReviewMaxDuration > 0 {
+				maxDuration = e.config.ReviewMaxDuration
+			}
+		}
+		reviewGuard = NewReviewProgressGuard(time.Now(), noProgressTimeout, maxDuration)
+	}
 
 	// Mark step as running
 	if err := e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit); err != nil {
@@ -682,7 +696,38 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 	// Execute with possible fix loop
 	for {
+		// Review agents receive a child context with the remaining guard budget.
+		// Approval waits below deliberately use the parent context so a human
+		// decision never consumes the autonomous no-progress window.
+		stepCtx := ctx
+		var cancelStep context.CancelFunc
+		var guardTimer *time.Timer
+		if reviewGuard != nil {
+			if remaining := reviewGuard.Remaining(time.Now()); remaining >= 0 {
+				stepCtx, cancelStep = context.WithCancel(ctx)
+				guardTimer = time.AfterFunc(remaining, cancelStep)
+			}
+		}
+		sctx.Ctx = stepCtx
 		outcome, err := step.Execute(sctx)
+		if guardTimer != nil {
+			guardTimer.Stop()
+		}
+		if cancelStep != nil {
+			cancelStep()
+		}
+		sctx.Ctx = ctx
+		if err != nil && reviewGuard != nil && ctx.Err() == nil {
+			if reason, stopped := reviewGuard.StopReason(time.Now()); stopped {
+				now := time.Now()
+				writeLog(fmt.Sprintf("review progress guard stopped autonomous work: %s", reason))
+				outcome = &StepOutcome{
+					NeedsApproval: true,
+					Findings:      reviewGuard.AttentionFindings(now),
+				}
+				err = nil
+			}
+		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
@@ -711,6 +756,20 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		} else {
 			if dbErr := e.db.ClearStepFindings(sr.ID); dbErr != nil {
 				slog.Warn("failed to clear step findings in db", "step", stepName, "error", dbErr)
+			}
+		}
+
+		if reviewGuard != nil {
+			now := time.Now()
+			reviewGuard.Observe(run.HeadSHA, outcome.Findings, now)
+			if reason, stopped := reviewGuard.StopReason(now); stopped {
+				outcome.NeedsApproval = true
+				outcome.AutoFixable = false
+				outcome.Findings = reviewGuard.AttentionFindings(now)
+				if dbErr := e.db.SetStepFindings(sr.ID, outcome.Findings); dbErr != nil {
+					slog.Warn("failed to set review progress guard finding in db", "step", stepName, "error", dbErr)
+				}
+				writeLog(fmt.Sprintf("review progress guard parked the step: %s", reason))
 			}
 		}
 
@@ -873,6 +932,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return false, fmt.Errorf("step %s: aborted by user", stepName)
 
 		case types.ActionFix:
+			if reviewGuard != nil {
+				reviewGuard.Reset(time.Now())
+			}
 			telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(outcome.Findings, response.findingIDs), 0))
 			// Fix - mark step as fixing, resume execution timer, re-execute.
 			phaseStart = time.Now()

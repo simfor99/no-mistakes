@@ -26,6 +26,12 @@ func TestLoadGlobal_Defaults(t *testing.T) {
 	if cfg.StepQuietWarning != DefaultStepQuietWarning {
 		t.Errorf("step_quiet_warning = %v, want %v", cfg.StepQuietWarning, DefaultStepQuietWarning)
 	}
+	if cfg.ReviewNoProgressTimeout != DefaultReviewNoProgressTimeout {
+		t.Errorf("review_no_progress_timeout = %v, want %v", cfg.ReviewNoProgressTimeout, DefaultReviewNoProgressTimeout)
+	}
+	if cfg.ReviewMaxDuration != DefaultReviewMaxDuration {
+		t.Errorf("review_max_duration = %v, want %v", cfg.ReviewMaxDuration, DefaultReviewMaxDuration)
+	}
 	if cfg.DaemonConnectTimeout != DefaultDaemonConnectTimeout {
 		t.Errorf("daemon_connect_timeout = %v, want %v", cfg.DaemonConnectTimeout, DefaultDaemonConnectTimeout)
 	}
@@ -81,6 +87,12 @@ func TestEnsureDefaultGlobalConfig_CreatedConfigIsLoadable(t *testing.T) {
 	if cfg.StepQuietWarning != DefaultStepQuietWarning {
 		t.Errorf("step_quiet_warning = %v, want %v", cfg.StepQuietWarning, DefaultStepQuietWarning)
 	}
+	if cfg.ReviewNoProgressTimeout != DefaultReviewNoProgressTimeout {
+		t.Errorf("review_no_progress_timeout = %v, want %v", cfg.ReviewNoProgressTimeout, DefaultReviewNoProgressTimeout)
+	}
+	if cfg.ReviewMaxDuration != DefaultReviewMaxDuration {
+		t.Errorf("review_max_duration = %v, want %v", cfg.ReviewMaxDuration, DefaultReviewMaxDuration)
+	}
 	if cfg.DaemonConnectTimeout != DefaultDaemonConnectTimeout {
 		t.Errorf("daemon_connect_timeout = %v, want %v", cfg.DaemonConnectTimeout, DefaultDaemonConnectTimeout)
 	}
@@ -102,6 +114,25 @@ func TestLoadGlobal_StepQuietWarning(t *testing.T) {
 	}
 	if cfg.StepQuietWarning != 90*time.Second {
 		t.Fatalf("step_quiet_warning = %v, want 90s", cfg.StepQuietWarning)
+	}
+}
+
+func TestLoadGlobal_ReviewProgressGuard(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("review_no_progress_timeout: 12m\nreview_max_duration: 50m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if cfg.ReviewNoProgressTimeout != 12*time.Minute {
+		t.Fatalf("review_no_progress_timeout = %v, want 12m", cfg.ReviewNoProgressTimeout)
+	}
+	if cfg.ReviewMaxDuration != 50*time.Minute {
+		t.Fatalf("review_max_duration = %v, want 50m", cfg.ReviewMaxDuration)
 	}
 }
 
@@ -422,6 +453,27 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 	}
 	if d != DefaultDaemonConnectTimeout {
 		t.Errorf("YAML daemon_connect_timeout = %v, Go default = %v", d, DefaultDaemonConnectTimeout)
+	}
+	d, err = time.ParseDuration(raw.StepQuietWarning)
+	if err != nil {
+		t.Fatalf("YAML step_quiet_warning %q is not a valid duration: %v", raw.StepQuietWarning, err)
+	}
+	if d != DefaultStepQuietWarning {
+		t.Errorf("YAML step_quiet_warning = %v, Go default = %v", d, DefaultStepQuietWarning)
+	}
+	d, err = time.ParseDuration(raw.ReviewNoProgressTimeout)
+	if err != nil {
+		t.Fatalf("YAML review_no_progress_timeout %q is not a valid duration: %v", raw.ReviewNoProgressTimeout, err)
+	}
+	if d != DefaultReviewNoProgressTimeout {
+		t.Errorf("YAML review_no_progress_timeout = %v, Go default = %v", d, DefaultReviewNoProgressTimeout)
+	}
+	d, err = time.ParseDuration(raw.ReviewMaxDuration)
+	if err != nil {
+		t.Fatalf("YAML review_max_duration %q is not a valid duration: %v", raw.ReviewMaxDuration, err)
+	}
+	if d != DefaultReviewMaxDuration {
+		t.Errorf("YAML review_max_duration = %v, Go default = %v", d, DefaultReviewMaxDuration)
 	}
 	if raw.LogLevel != "info" {
 		t.Errorf("YAML log_level = %q, Go default = %q", raw.LogLevel, "info")

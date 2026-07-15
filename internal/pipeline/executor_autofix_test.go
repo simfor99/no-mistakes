@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,6 +55,52 @@ func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 	updated, _ := database.GetRun(run.ID)
 	if updated.Status != types.RunCompleted {
 		t.Errorf("expected run status %q, got %q", types.RunCompleted, updated.Status)
+	}
+}
+
+func TestExecutor_ReviewProgressGuardParksRepeatedFindings(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	cfg := &config.Config{
+		AutoFix:                 config.AutoFix{Review: 5},
+		ReviewNoProgressTimeout: 1 * time.Millisecond,
+		ReviewMaxDuration:       time.Second,
+	}
+
+	callCount := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(_ *StepContext) (*StepOutcome, error) {
+			callCount++
+			time.Sleep(2 * time.Millisecond)
+			return &StepOutcome{
+				NeedsApproval: true,
+				AutoFixable:   true,
+				Findings:      `{"findings":[{"id":"same","severity":"warning","file":"review.go","line":7,"description":"same finding","action":"auto-fix"}],"summary":"same"}`,
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(steps) != 1 || steps[0].FindingsJSON == nil || !strings.Contains(*steps[0].FindingsJSON, `review-diminishing-progress`) {
+		t.Fatalf("expected machine-readable diminishing-progress finding, steps=%+v", steps)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected guard after one repeated review, got %d calls", callCount)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatalf("abort parked guard: %v", err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("expected aborted guarded run to return an error")
 	}
 }
 

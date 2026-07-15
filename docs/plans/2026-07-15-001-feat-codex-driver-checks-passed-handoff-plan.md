@@ -299,6 +299,15 @@ Die persönliche Codex-Installation erhält danach eine kompatible Driver-Regel 
   - Eine geschlossene Codex-Session bekommt kein vorgetäuschtes automatisches Reentry (`unit_mocked`; beweist die Kommunikationsgrenze).
 - **Verification:** Die lokale Dokumentation nennt die installierte Binary-Version, den Quell-Commit, die Wiederherstellungsquelle und die Abgrenzung zum öffentlichen PR.
 
+### U5. Deterministischen Schutz gegen Review-Dauerschleifen ergänzen
+
+- **Goal:** Einen Review-/Fix-Lauf automatisch parken, wenn er über längere Zeit keinen belastbaren Fortschritt erzeugt oder sein absolutes Arbeitsbudget erreicht, ohne einen neuen Run-Zustand oder eine zweite Orchestrierung einzuführen.
+- **Requirements:** F1, F3, F4; AE1, AE2, AE6.
+- **Dependencies:** U1 bis U4 bleiben unabhängig; der Guard schützt den gemeinsamen Review-Executor und den öffentlichen Agentenpfad.
+- **Files:** `internal/config/config.go`, `internal/config/config_global_test.go`, `internal/pipeline/review_guard.go`, `internal/pipeline/review_guard_test.go`, `internal/pipeline/executor.go`, `internal/pipeline/executor_autofix_test.go`, `internal/pipeline/steps/review.go`, `internal/pipeline/steps/review_session_test.go`, `docs/src/content/docs/concepts/auto-fix.md`, `docs/src/content/docs/reference/global-config.md`, `docs/src/content/docs/reference/pipeline-steps.md` sowie die lokale Patch-Chronik außerhalb des Repositories.
+- **Approach:** Fortschritt wird ausschließlich deterministisch aus einem neuen `HEAD` oder einer semantisch veränderten Finding-Menge abgeleitet; generierte IDs, Reihenfolge, Summaries und Log-Aktivität werden ignoriert. Der erste Review prüft den gesamten Branch, ein Post-Fix-Review nur die neue Fix-Range. Standardmäßig parkt der bestehende Approval-Gate-Pfad nach 15 Minuten ohne Fortschritt oder nach 45 Minuten Gesamtbudget mit einem stabilen `ask-user`-Finding. Ein Fixer ohne neuen Commit darf die historische Branch-Diff nicht erneut öffnen.
+- **Verification:** Die Guard- und Executor-Regressionen beweisen Wiederholungsstopp, Budgetstopp, semantische Fortschritts-Erkennung, fokussierte Rereview-Scopes und den maschinenlesbaren Approval-Handoff. Die Grenzen sind global-only, damit ein Repository-Branch seinen eigenen Sicherheitsgurt nicht abschalten kann.
+
 ---
 
 ## Verification Contract
@@ -310,6 +319,7 @@ Die persönliche Codex-Installation erhält danach eine kompatible Driver-Regel 
 | Getaggte Prozess-/Daemon-E2E für U1 | `integration_local` | Die CLI beobachtet einen lokalen Run über die echte Prozessgrenze | Closed-turn-Reentry oder produktive GitHub-Interaktion |
 | Generierter-Skill- und Dokumentationscheck für U3 | `integration_local` | Skill-Ausgabe ist aus der Quelle erzeugt und die Dokumentation bleibt synchron | Verhalten einer externen Codex-Version |
 | Persönlicher Driver-Contract für U4 | `integration_local` | Autorität, Full-SHA-Receipt und Drift-Stopp werden nicht verwechselt | Einen erfolgreichen Remote-Merge ohne die reale GitHub-Umgebung |
+| Review-Loop-Guard für U5 | `unit_mocked` | Deterministischer Fortschritt, Zeitbudget, fokussierte Rereview und Approval-Handoff | Subjektive Qualitätsbewertung oder autonomes Reentry nach Sessionende |
 | Echter PR-Smoketest nach Umsetzung | `live_local` | Ein autorisierter Driver kann mit GitHub-Zugang den vollständigen Receipt für einen echten PR erstellen | Unbeaufsichtigtes Reentry nach geschlossener Session oder alle Branch-Protection-Varianten |
 
 | Origin case | Verification target | Coverage |
@@ -341,3 +351,4 @@ Required execution gates:
 - Gate, Quiet, Terminal, Head-Drift, unklare Mergeability und neue externe Reviews führen sicher zu keinem Merge.
 - Alle geplanten Unit-, Integrations-, E2E-, Generierungs- und Dokumentationsgates sind bestanden oder ehrlich als `blocked`, `deferred` oder `not_claimed` ausgewiesen.
 - Der persönliche Driver-Follow-up ist getrennt vom öffentlichen PR dokumentiert und die lokale Patch-Chronik ist aktualisiert.
+- Review-Dauerschleifen werden bei fehlendem semantischem Fortschritt oder ausgeschöpftem Zeitbudget deterministisch geparkt; vorhandene Fix-Commits bleiben erhalten und der bestehende Approval-Gate ist der Recovery-Pfad.

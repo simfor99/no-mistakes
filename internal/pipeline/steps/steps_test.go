@@ -47,6 +47,18 @@ func handleFakeCLI(mode string) {
 		fmt.Println(fakeCIGHLiveHead())
 		return
 	}
+	if strings.HasPrefix(mode, "ci-gh") && isFakeCIGHBaseBranchRequest(args) {
+		if baseErr := os.Getenv("FAKE_CLI_BASE_BRANCH_ERR"); baseErr != "" {
+			fmt.Fprintln(os.Stderr, baseErr)
+			os.Exit(1)
+		}
+		baseBranch := os.Getenv("FAKE_CLI_BASE_BRANCH")
+		if baseBranch == "" {
+			baseBranch = "main"
+		}
+		fmt.Println(baseBranch)
+		return
+	}
 
 	switch mode {
 	case "gh":
@@ -83,6 +95,11 @@ func handleFakeCLI(mode string) {
 func isFakeCIGHHeadRequest(args []string) bool {
 	joined := strings.Join(args, " ")
 	return strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid")
+}
+
+func isFakeCIGHBaseBranchRequest(args []string) bool {
+	joined := strings.Join(args, " ")
+	return strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName")
 }
 
 func fakeCIGHLiveHead() string {

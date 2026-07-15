@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -21,9 +22,10 @@ import (
 // It mints deterministic session ids ("sess-1", "sess-2", ...) for new
 // sessions and echoes resumed ids, recording every invocation.
 type sessionMockAgent struct {
-	mu     sync.Mutex
-	calls  []agent.RunOpts
-	nextID int
+	mu            sync.Mutex
+	calls         []agent.RunOpts
+	nextID        int
+	fixFileNumber int
 	// respond picks the reply for one invocation (called under the lock).
 	respond func(opts agent.RunOpts) *agent.Result
 }
@@ -40,6 +42,13 @@ func (m *sessionMockAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 	m.calls = append(m.calls, opts)
 
 	result := m.respond(opts)
+	if opts.Purpose == "review-fix" && opts.CWD != "" {
+		m.fixFileNumber++
+		path := filepath.Join(opts.CWD, fmt.Sprintf("review-fix-%d.txt", m.fixFileNumber))
+		if err := os.WriteFile(path, []byte("fix evidence\n"), 0o644); err != nil {
+			panic(err)
+		}
+	}
 	if opts.Session != nil {
 		if opts.Session.ID != "" {
 			result.SessionID = opts.Session.ID
@@ -112,8 +121,8 @@ func fixCalls(calls []agent.RunOpts) []agent.RunOpts {
 // step through the executor's auto-fix loop for multiple rounds and proves:
 // N review rounds share ONE reviewer session (started once, resumed after),
 // N fix rounds share ONE separate fixer session, the two roles never
-// exchange identities, and every review round still asks for a full review
-// pass of the branch.
+// exchange identities, while the initial review is full-branch and each
+// post-fix review stays scoped to the new fix range.
 func TestReviewLoop_OneReviewerSessionOneFixerSession(t *testing.T) {
 	reviewRound := 0
 	mock := &sessionMockAgent{}
@@ -185,14 +194,20 @@ func TestReviewLoop_OneReviewerSessionOneFixerSession(t *testing.T) {
 		}
 	}
 
-	// Every review round, including rereviews inside the resumed session,
-	// still demands a full adversarial pass over the branch.
-	for i, call := range reviews {
-		if !strings.Contains(call.Prompt, "Do a full review pass before returning") {
-			t.Fatalf("review round %d prompt lost the full-review demand:\n%s", i+1, call.Prompt)
+	// The first round reviews the full branch; every post-fix rereview is
+	// explicitly scoped to the newly committed fix range.
+	if !strings.Contains(reviews[0].Prompt, "review scope: branch changes between") {
+		t.Fatalf("initial review lost the full-branch scope:\n%s", reviews[0].Prompt)
+	}
+	for i, call := range reviews[1:] {
+		if !strings.Contains(call.Prompt, "review scope: new fix changes between") {
+			t.Fatalf("review round %d prompt lost the focused fix scope:\n%s", i+2, call.Prompt)
+		}
+		if strings.Contains(call.Prompt, "Do a full review pass before returning") {
+			t.Fatalf("review round %d reopened the full-review instruction:\n%s", i+2, call.Prompt)
 		}
 		if !strings.Contains(call.Prompt, "Review the code changes") {
-			t.Fatalf("review round %d prompt is not a full review prompt:\n%s", i+1, call.Prompt)
+			t.Fatalf("review round %d prompt is not a review prompt:\n%s", i+2, call.Prompt)
 		}
 	}
 
@@ -264,8 +279,8 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 	if fixes[0].Session == nil || fixes[0].Session.ID != "" {
 		t.Fatalf("user-driven fix must start the fixer session, got %+v", fixes[0].Session)
 	}
-	if !strings.Contains(reviews[1].Prompt, "Do a full review pass before returning") {
-		t.Fatalf("post-fix rereview lost the full-review demand:\n%s", reviews[1].Prompt)
+	if !strings.Contains(reviews[0].Prompt, "review scope: branch changes between") || !strings.Contains(reviews[1].Prompt, "review scope: new fix changes between") {
+		t.Fatalf("post-fix review scopes are not explicit:\ninitial:\n%s\nfollow-up:\n%s", reviews[0].Prompt, reviews[1].Prompt)
 	}
 }
 

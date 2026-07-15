@@ -61,3 +61,22 @@ Statusantwort zu senden oder auf manuelle Nachfrage zu warten.
 - Vereinfacht: Bestehendes `checks-passed` ist der einzige Übergabepunkt.
 - Automation: Nur innerhalb einer explizit autorisierten Merge-Route;
   Stopp bei Gate, Head-Wechsel, unklarer Mergeability oder fehlender Quittung.
+
+## Neue Arbeitsfrage: abnehmender Wert im Review-Loop
+
+Der zweite Lauf zur Prüfung der drei Gemini-Funde öffnete nach einem Fix-Commit
+erneut die vollständige große Branch-Prüfung. Dadurch entstanden vier
+nachgelagerte Funde, ohne dass der Nutzer noch einen klaren zusätzlichen
+Fortschritt pro Zeit erhielt. Das ist eine Prozessschleife, kein Beweis für
+einen weiteren Produktfehler.
+
+Arbeitsannahme: Kein subjektiver „KI-Wertscore“. Stattdessen braucht No-Mistakes
+einen deterministischen Progress-Watchdog mit drei Signalen: neue belastbare
+Evidence, veränderter Head oder tatsächlich verringerte/gelöste Findings. Ein
+identischer Befund-Digest ohne neue Evidence über ein begrenztes Zeitfenster
+beendet die autonome Runde mit `attention: diminishing-progress`; er merged
+nicht und verwirft keinen Commit.
+
+Der Watchdog muss mit einem engeren Re-Review-Scope gekoppelt werden: Nach einem
+Fix wird nur der neue Fix-Bereich erneut geprüft, nicht jedes Mal der komplette
+historische Branch. Harte Runden- und Zeitbudgets bleiben die letzte Sicherung.

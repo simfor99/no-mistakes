@@ -36,6 +36,10 @@ ci_timeout: "168h"
 
 step_quiet_warning: "10m"
 
+review_no_progress_timeout: "15m"
+
+review_max_duration: "45m"
+
 daemon_connect_timeout: "3s"
 
 log_level: info
@@ -242,6 +246,28 @@ It does not cancel the step, change auto-fix behavior, or mark the run failed.
 AXI renders the quiet signal in the `active_steps` table as part of `last_activity`, for example `quiet 12m3s ago: codex started pid=4242`.
 For older active runs that do not yet have activity rows, AXI falls back to the step log file's modification time.
 
+### review_no_progress_timeout
+
+Maximum time an autonomous review/fix loop may continue without a new commit or materially different semantic findings.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `15m`                  |
+
+This is a global-only safety limit. Generated log chatter and regenerated finding IDs do not count as progress. When the limit is reached, the review step parks at the existing approval gate with the machine-readable finding ID `review-diminishing-progress`; it does not discard commits, fail the run, or merge anything. Human approval starts a fresh progress window.
+
+### review_max_duration
+
+Absolute wall-clock budget for one autonomous review/fix loop.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `45m`                  |
+
+This is a global-only hard safety limit. It cancels the active review agent through its context and parks the step with `review-review-time-budget` when the budget expires. Approval waits are excluded, and a new human fix response resets the autonomous window. The limit is separate from `ci_timeout`, which continues to govern long-lived PR monitoring.
+
 ### daemon_connect_timeout
 
 Maximum time a CLI client waits for an existing daemon socket to accept a connection before failing instead of hanging. Guards against a daemon process that is alive but stuck or unresponsive.
@@ -272,9 +298,9 @@ Per-run, per-role agent session reuse for the review loop.
 | Type    | `bool` |
 | Default | `true` |
 
-When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), each run keeps one durable reviewer session across the initial full review and every full rereview, and a separate durable fixer session across review-fix turns.
+When enabled and the pipeline agent supports native session resume (claude via `--resume`, codex via `exec resume`), each run keeps one durable reviewer session across the initial full review and focused rereviews of new fix ranges, and a separate durable fixer session across review-fix turns.
 The roles never share a session, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
-Every review turn still performs a full review of the complete branch diff; only the reviewer's own prior context is carried.
+The initial review covers the branch diff; after a fixer commit, rereview is restricted to that new fix range plus necessary surrounding context. Only the reviewer's own prior context is carried.
 When resume is unavailable or fails, the invocation falls back to a cold run or a fresh same-role session and the fallback is recorded in the local `agent_invocations` performance record.
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts.
 The [daemon crash-recovery reference](/no-mistakes/concepts/daemon/#crash-recovery) owns which parked gates can resume or reconcile after a restart.

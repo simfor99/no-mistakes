@@ -19,15 +19,19 @@ func (s *ReviewStep) Name() types.StepName { return types.StepReview }
 func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	reviewFromSHA := baseSHA
+	reviewTargetSHA := sctx.Run.HeadSHA
 	branch := sctx.Run.Branch
 	ignorePatterns := "none"
 	if len(sctx.Config.IgnorePatterns) > 0 {
 		ignorePatterns = strings.Join(sctx.Config.IgnorePatterns, ", ")
 	}
 
-	reviewScope := fmt.Sprintf("branch changes between %s and %s", baseSHA, sctx.Run.HeadSHA)
+	reviewScope := fmt.Sprintf("branch changes between %s and %s", reviewFromSHA, reviewTargetSHA)
+	fixStartSHA := ""
 	if sctx.Fixing {
-		reviewScope = fmt.Sprintf("current worktree and HEAD changes relative to base commit %s (starting head %s)", baseSHA, sctx.Run.HeadSHA)
+		fixStartSHA = sctx.Run.HeadSHA
+		reviewScope = fmt.Sprintf("current worktree and HEAD changes relative to base commit %s (starting head %s)", baseSHA, fixStartSHA)
 	}
 
 	// Bounded workload size (changed files + net lines) for local telemetry, so
@@ -108,15 +112,27 @@ Previous review findings to address:
 			return nil, err
 		}
 		fixSummary = summary
+		reviewFromSHA = fixStartSHA
+		reviewTargetSHA = sctx.Run.HeadSHA
+		if strings.EqualFold(strings.TrimSpace(reviewFromSHA), strings.TrimSpace(reviewTargetSHA)) {
+			// A fixer that produced no new commit has not supplied new evidence.
+			// Park the existing issue for a human instead of reopening the full
+			// branch and allowing the same autonomous loop to repeat.
+			return &pipeline.StepOutcome{
+				NeedsApproval: true,
+				Findings:      reviewFixWithoutCommitFindings(),
+				FixSummary:    fixSummary,
+			}, nil
+		}
+		reviewScope = fmt.Sprintf("new fix changes between %s and %s", reviewFromSHA, reviewTargetSHA)
 	}
 
+	// Recompute the bounded workload after a fixer commit so the rereview
+	// measures only the new fix range, not the historical branch.
+	workload = reviewWorkload(ctx, sctx.WorkDir, reviewFromSHA, reviewTargetSHA)
+
 	// Check whether there are any reviewable changed files after applying ignore patterns.
-	var args []string
-	if sctx.Fixing {
-		args = []string{"diff", "--name-only", baseSHA}
-	} else {
-		args = []string{"diff", "--name-only", baseSHA + ".." + sctx.Run.HeadSHA}
-	}
+	args := []string{"diff", "--name-only", reviewFromSHA + ".." + reviewTargetSHA}
 	changedFiles, err := git.Run(ctx, sctx.WorkDir, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get changed files: %w", err)
@@ -170,6 +186,11 @@ Previous review findings to address:
 	// regardless of intent source. Held pending a scope decision.
 	historySection := executionContextPromptSection() + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + intentConformanceReviewClause(sctx)
 
+	reviewCompleteness := "Do a full review pass before returning. Do not stop after the first valid finding. Continue inspecting the rest of the changed code until you have enumerated all material issues you can substantiate."
+	if sctx.Fixing {
+		reviewCompleteness = "Review the new fix range completely before returning. Keep the review focused on that range and its necessary surrounding context; do not reopen unrelated historical branch changes unless the fix makes them directly relevant."
+	}
+
 	prompt := fmt.Sprintf(
 		`Review the code changes and return structured findings with a risk assessment.
 
@@ -188,7 +209,7 @@ Task:
 - Analyze for bugs, risks, and code simplification opportunities.
 - "Simplification" means reducing code complexity through non-functional refactoring (e.g. deduplication, clearer control flow). It does NOT mean removing features, changing product behavior, or stripping intentional user-facing output.
 - Treat security issues, performance regressions, breaking changes, and insufficient error handling as risks.
-- Do a full review pass before returning. Do not stop after the first valid finding. Continue inspecting the rest of the changed code until you have enumerated all material issues you can substantiate.
+- %s
 
 Rules:
 - Anchor every finding to a specific file and one-indexed line number in the changed code when possible.
@@ -209,18 +230,17 @@ Risk assessment (after listing all findings):
 - Provide a one-sentence risk_rationale explaining why you chose that risk level.%s`,
 		branch,
 		baseSHA,
-		sctx.Run.HeadSHA,
+		reviewTargetSHA,
 		reviewScope,
 		sctx.Repo.DefaultBranch,
 		ignorePatterns,
+		reviewCompleteness,
 		historySection,
 	)
 
 	// Every review turn - the initial review and every post-fix rereview -
-	// resumes the run's single durable reviewer session. The prompt above
-	// still demands a full review of the complete branch diff each turn; the
-	// session only carries the reviewer's own prior context, never the
-	// fixer's (that role has its own isolated session in executeFixMode).
+	// resumes the run's single durable reviewer session. The session carries
+	// only the reviewer's own prior context, never the fixer's isolated session.
 	result, err := sctx.RunAgentSession(pipeline.SessionRoleReviewer, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
@@ -251,6 +271,26 @@ Risk assessment (after listing all findings):
 		Findings:      string(findingsJSON),
 		FixSummary:    fixSummary,
 	}, nil
+}
+
+func reviewFixWithoutCommitFindings() string {
+	findings := types.Findings{
+		Items: []types.Finding{{
+			ID:          "review-no-new-commit",
+			Severity:    "warning",
+			Description: "The review fixer produced no new commit; the remaining finding requires human review instead of another autonomous rereview.",
+			Action:      types.ActionAskUser,
+			Source:      "pipeline",
+		}},
+		Summary:       "Review fixer produced no new commit",
+		RiskLevel:     "medium",
+		RiskRationale: "No new code evidence was produced to justify reopening the full branch review.",
+	}
+	raw, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		return `{"findings":[{"id":"review-no-new-commit","severity":"warning","description":"The review fixer produced no new commit; human review is required.","action":"ask-user","source":"pipeline"}],"summary":"Review fixer produced no new commit","risk_level":"medium","risk_rationale":"No new code evidence was produced."}`
+	}
+	return raw
 }
 
 func sanitizedPreviousFindingsForPrompt(raw string) string {

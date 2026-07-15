@@ -113,6 +113,36 @@ func TestReviewStep_FixMode(t *testing.T) {
 	}
 }
 
+func TestReviewStep_FixMode_NoCommitParksForHumanReview(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"summary":"recheck findings"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","description":"same issue","action":"auto-fix"}]}`
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("expected no-commit fixer result to require approval")
+	}
+	if !strings.Contains(outcome.Findings, `"id":"review-no-new-commit"`) {
+		t.Fatalf("expected stable no-commit finding, got %s", outcome.Findings)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("expected only the fixer call, got %d agent calls", len(ag.calls))
+	}
+}
+
 // The review fixer must apply every fix first, then run one focused
 // verification of the changed area, and must NOT re-run the whole repository
 // test/lint suite in the fix round. A forensic audit measured the old

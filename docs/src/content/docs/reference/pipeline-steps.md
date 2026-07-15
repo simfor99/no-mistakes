@@ -60,14 +60,14 @@ Fetches the latest authoritative remote state, fetches the configured pushed-bra
 AI code review of your diff.
 
 **Behavior:**
-- Diffs the base commit against head
+- Diffs the base commit against head on the initial pass; after a fixer commit, rereviews only the new fix range plus necessary surrounding context
 - Filters out files matching `ignore_patterns` from the repo config
 - Sends the filtered diff to the agent with structured review instructions and a structured output schema
 - Includes user intent when the run has supplied intent or transcript matching found a relevant local agent session; the detailed provenance semantics are documented in [Intent extraction](/no-mistakes/guides/agents/#intent-extraction)
 - Agent returns findings with severity (`error`, `warning`, `info`), file location, description, and an `action` (`no-op`, `auto-fix`, `ask-user`)
 - Also returns a `risk_level` (`low`, `medium`, `high`) and `risk_rationale`
-- With the default `session_reuse: true`, Claude and Codex reuse one reviewer session across the initial review and every full rereview, and a separate fixer session across review-fix turns
-- A resume failure retries the same turn in a fresh session for that role, never skips the full rereview, and unsupported agents run cold
+- With the default `session_reuse: true`, Claude and Codex reuse one reviewer session across the initial review and focused rereviews, and a separate fixer session across review-fix turns
+- A resume failure retries the same turn in a fresh session for that role, never skips the scoped rereview, and unsupported agents run cold
 
 **Approval:** required if any finding has severity `error` or `warning`. Findings with `action: ask-user` pause for approval instead of entering the normal auto-fix loop. This is for findings that challenge the author's intent, not routine correctness, reliability, or security fixes that may need to re-add a small amount of deleted logic. With the default `auto_fix.review: 0`, blocking review findings park for approval even when their action is `auto-fix`; setting repo or global `auto_fix.review` above `0` re-enables the automatic review fix loop for eligible `auto-fix` findings. Findings with `action: no-op` are informational only. The shared [finding-action model](/no-mistakes/concepts/auto-fix/#finding-actions) owns the behavior for a missing `action`.
 
@@ -75,6 +75,7 @@ AI code review of your diff.
 The fixer applies all selected fixes before running one focused verification limited to the changed area, and it is instructed not to run the complete repository test or lint suite during the fix round.
 The dedicated Test and Lint steps after review remain the authoritative gates, although their coverage may be focused when commands are unconfigured.
 Follow-up review passes use the history to avoid re-reporting user-ignored findings unless the code now has a materially different problem.
+If the loop produces no new commit or materially different semantic findings for `review_no_progress_timeout`, or reaches `review_max_duration`, it parks with a `review-diminishing-progress` or `review-review-time-budget` finding instead of starting another autonomous fix round. The existing approval gate remains the recovery path.
 Fix commits use `no-mistakes(review): <summary>`.
 
 **Default auto-fix limit:** `0`.

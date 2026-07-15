@@ -30,6 +30,13 @@ flowchart TD
    - If issues remain, the step pauses for user approval
    - If everything passes, the step completes and the pipeline moves on
 
+Review loops have an additional deterministic safety guard. The initial review
+covers the branch; a post-fix rereview covers only the newly committed fix
+range. If no new commit or materially different semantic findings appear for
+`review_no_progress_timeout`, or the absolute `review_max_duration` is reached,
+the review parks for human attention instead of opening another autonomous
+round. Approval waits do not consume either budget.
+
 The document step applies fixes during its initial pass instead of relying on a follow-up automatic fix loop.
 When `commands.lint` is empty, that same invocation is a combined documentation-and-lint housekeeping pass: it updates documentation, detects relevant linters and formatters, applies safe fixes, verifies both duties, and categorizes any unresolved findings for the document or lint gate.
 The lint step consumes a usable lint result from that pass instead of starting a second cold agent invocation; when the combined pass is skipped, cannot produce trustworthy structured output, or loses its in-memory result across a daemon restart, lint falls back to its own agent pass.
