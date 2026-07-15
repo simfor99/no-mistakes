@@ -100,6 +100,7 @@ func TestWriteRunObjectShape(t *testing.T) {
 		"  branch: feature/x\n",
 		"  status: running\n",
 		"  head: abcdef12\n",
+		"  head_sha: abcdef1234567890\n",
 		"  findings: 1 info\n",
 		"  steps[2]{step,status,findings,duration_ms}:\n",
 		"    review,completed,1,1200\n",

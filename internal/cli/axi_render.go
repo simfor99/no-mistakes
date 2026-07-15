@@ -411,7 +411,10 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	if rv.AwaitingAgentSince != nil && !terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "awaiting_agent", Value: formatParkedFor(*rv.AwaitingAgentSince)})
 	}
-	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
+	fields = append(fields,
+		toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)},
+		toon.Field{Key: "head_sha", Value: rv.HeadSHA},
+	)
 	if rv.PRURL != "" {
 		fields = append(fields, toon.Field{Key: "pr", Value: rv.PRURL})
 	}
