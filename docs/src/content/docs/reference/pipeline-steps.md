@@ -200,11 +200,11 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 
 **Behavior:**
 - Polls provider CI status at increasing intervals: every 30s for the first 5 minutes, every 60s for 5-15 minutes, every 120s after that
-- On GitHub, reads native Check Runs and legacy commit statuses for the PR's current head separately and processes every result page. A pending legacy status without a link is advisory only when GitHub's readable branch-protection and ruleset policy confirms that its context is not required; native checks, linked or required legacy statuses, and any unreadable or unresolved policy remain blocking
+- On GitHub, reads native Check Runs and legacy commit statuses for the PR's current head separately and processes every result page. Every pending result, including an unlinked legacy status that is not required by branch policy, remains blocking; unreadable or unresolved policy also remains blocking
 - Continues its normal monitoring loop until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses, then parks at an approval gate instead of ending the run
 - The [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) owns idle re-arming, unlimited monitoring, and fail-closed reconciliation while that gate is parked
 - On GitHub, GitLab, and Azure DevOps, polls provider mergeability alongside CI checks while the PR remains open
-- While the PR stays open, the TUI and terminal title show `Checks passed` once checks are green and known mergeability is clear, and `no-mistakes axi` returns `outcome: checks-passed` with successful-output reporting instructions so agents can summarize the run, ask the user to review and merge, and list any pipeline fixes instead of waiting
+- While the PR stays open, the TUI and terminal title show `Checks passed` once checks are green and known mergeability is clear. `no-mistakes axi` returns `outcome: checks-passed` only after a live PR-head receipt matches the stored run `head_sha` (currently GitHub); providers without live-head provenance retain the human success display but do not emit the agent handoff
 - If the default branch moves after `checks-passed`, keeps watching the same PR; a clean behind PR needs no action, while an actual GitHub, GitLab, or Azure DevOps merge conflict is auto-fixed by rebasing onto the base and re-pushing through the force-push safety guard
 - The ready signal clears if checks start running again, new failures appear, provider state becomes uncertain, or the PR is merged, closed, or declined
 - Waits a 60s grace period before trusting empty results (CI checks may not have registered yet)
