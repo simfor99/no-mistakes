@@ -599,16 +599,16 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			text = prefix + strings.TrimRight(text, "\n") + "\n\n"
 			lastChunkNewline = true
 		}
-		e.emitLogChunk(run, repo, stepName, text)
 		fmt.Fprint(logFile, text)
+		e.emitLogChunk(run, repo, stepName, text)
 		touchLogActivity(text, true)
 	}
 	writeLogChunk := func(text string) {
 		if text != "" {
 			lastChunkNewline = strings.HasSuffix(text, "\n")
 		}
-		e.emitLogChunk(run, repo, stepName, text)
 		fmt.Fprint(logFile, text)
+		e.emitLogChunk(run, repo, stepName, text)
 		touchLogActivity(text, strings.Contains(text, "\n"))
 	}
 	onAgentLifecycle := func(event agent.LifecycleEvent) {

@@ -59,6 +59,40 @@ func TestExecutor_LogCallback(t *testing.T) {
 	}
 }
 
+func TestExecutor_LogEventFollowsPersistedLog(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	logPath := filepath.Join(p.RunLogDir(run.ID), "review.log")
+	const message = "CI checks passed - waiting for merge"
+
+	var persistedAtEvent string
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			sctx.Log(message)
+			return &StepOutcome{ExitCode: 0}, nil
+		},
+	}
+	onEvent := func(e ipc.Event) {
+		if e.Type != ipc.EventLogChunk || e.Content == nil || !strings.Contains(*e.Content, message) {
+			return
+		}
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			return
+		}
+		persistedAtEvent = string(data)
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, onEvent)
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(persistedAtEvent, message) {
+		t.Fatalf("log event arrived before its content was persisted: %q", persistedAtEvent)
+	}
+}
+
 func TestExecutor_LogCallbackTouchesStepActivity(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
