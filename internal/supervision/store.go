@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const workerStartGrace = 30 * time.Second
+
 type Phase string
 
 const (
@@ -36,6 +38,17 @@ type Registration struct {
 
 type Store struct{ dir string }
 
+type workerLockRecord struct {
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"started_at"`
+}
+
+type WorkerLock struct {
+	store *Store
+	file  *os.File
+	runID string
+}
+
 func NewStore(dir string) *Store { return &Store{dir: dir} }
 
 func (s *Store) Path(runID string) string { return filepath.Join(s.dir, runID+".json") }
@@ -47,11 +60,14 @@ func (s *Store) Arm(reg Registration) (Registration, error) {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return Registration{}, fmt.Errorf("create supervision directory: %w", err)
 	}
-	unlock, err := s.acquireClaimLock()
+	lock, held, err := s.acquireClaimLock()
 	if err != nil {
 		return Registration{}, err
 	}
-	defer unlock()
+	if !held {
+		return Registration{}, fmt.Errorf("supervision registration is busy")
+	}
+	defer lock.Release()
 	regs, err := s.all()
 	if err != nil {
 		return Registration{}, err
@@ -82,14 +98,14 @@ func (s *Store) Claim(cwd, sessionID string) (Registration, bool, error) {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return Registration{}, false, fmt.Errorf("create supervision directory: %w", err)
 	}
-	unlock, err := s.acquireClaimLock()
-	if os.IsExist(err) {
-		return Registration{}, false, nil
-	}
+	lock, held, err := s.acquireClaimLock()
 	if err != nil {
 		return Registration{}, false, err
 	}
-	defer unlock()
+	if !held {
+		return Registration{}, false, nil
+	}
+	defer lock.Release()
 	regs, err := s.all()
 	if err != nil {
 		return Registration{}, false, err
@@ -140,33 +156,46 @@ func (s *Store) FindByCWD(cwd string) (Registration, bool, error) {
 	return Registration{}, false, nil
 }
 
-func (s *Store) acquireClaimLock() (func(), error) {
-	lock, err := os.OpenFile(filepath.Join(s.dir, ".claim.lock"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if err := lock.Close(); err != nil {
-		_ = os.Remove(lock.Name())
-		return nil, fmt.Errorf("close registration lock: %w", err)
-	}
-	return func() { _ = os.Remove(lock.Name()) }, nil
+func (s *Store) acquireClaimLock() (*storeLock, bool, error) {
+	return acquireStoreLock(filepath.Join(s.dir, ".claim.lock"))
 }
 
-// AcquireWorker grants one process ownership of a registration's watch phase.
-// The lock is intentionally filesystem-backed so separate hook processes
-// cannot create duplicate resume turns.
 func (s *Store) AcquireWorker(runID string) (bool, error) {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return false, fmt.Errorf("create supervision directory: %w", err)
 	}
-	file, err := os.OpenFile(s.workerLockPath(runID), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if os.IsExist(err) {
+	lock, held, err := s.acquireClaimLock()
+	if err != nil {
+		return false, err
+	}
+	if !held {
 		return false, nil
 	}
-	if err != nil {
-		return false, fmt.Errorf("lock worker: %w", err)
+	defer lock.Release()
+
+	path := s.workerLockPath(runID)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return s.createWorkerLock(path)
+	} else if err != nil {
+		return false, fmt.Errorf("inspect worker lock: %w", err)
 	}
-	return true, file.Close()
+
+	worker, active, err := s.tryWorkerLock(runID)
+	if err != nil {
+		return false, err
+	}
+	if !active {
+		return false, nil
+	}
+	_ = unlockStoreFile(worker)
+	_ = worker.Close()
+	if !s.workerLockExpired(path) {
+		return false, nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("remove stale worker lock: %w", err)
+	}
+	return s.createWorkerLock(path)
 }
 
 func (s *Store) ReleaseWorker(runID string) error {
@@ -175,6 +204,70 @@ func (s *Store) ReleaseWorker(runID string) error {
 		return nil
 	}
 	return err
+}
+
+func (s *Store) HoldWorker(runID string) (*WorkerLock, bool, error) {
+	file, active, err := s.tryWorkerLock(runID)
+	if err != nil || !active {
+		return nil, active, err
+	}
+	lock := &WorkerLock{store: s, file: file, runID: runID}
+	record, err := json.Marshal(workerLockRecord{PID: os.Getpid(), StartedAt: time.Now().UTC()})
+	if err != nil {
+		_ = lock.Release()
+		return nil, false, fmt.Errorf("encode worker lock: %w", err)
+	}
+	if err := file.Truncate(0); err != nil {
+		_ = lock.Release()
+		return nil, false, fmt.Errorf("reset worker lock: %w", err)
+	}
+	if _, err := file.WriteAt(record, 0); err != nil {
+		_ = lock.Release()
+		return nil, false, fmt.Errorf("write worker lock: %w", err)
+	}
+	return lock, true, nil
+}
+
+func (l *WorkerLock) Release() error {
+	if l == nil || l.file == nil {
+		return nil
+	}
+	file := l.file
+	l.file = nil
+	_ = unlockStoreFile(file)
+	closeErr := file.Close()
+	removeErr := l.store.ReleaseWorker(l.runID)
+	if closeErr != nil {
+		return fmt.Errorf("close worker lock: %w", closeErr)
+	}
+	return removeErr
+}
+
+func (s *Store) Handoff(runID, fingerprint string) (Registration, bool, error) {
+	lock, held, err := s.acquireClaimLock()
+	if err != nil {
+		return Registration{}, false, err
+	}
+	if !held {
+		return Registration{}, false, nil
+	}
+	defer lock.Release()
+	reg, found, err := s.Get(runID)
+	if err != nil || !found || reg.Phase != PhaseWatching {
+		return reg, false, err
+	}
+	if reg.Fingerprint == fingerprint {
+		reg.Phase = PhaseAwaitingUser
+	} else {
+		reg.Phase = PhaseHandoffInProgress
+		reg.Fingerprint = fingerprint
+	}
+	reg.Error = ""
+	reg.UpdatedAt = time.Now().UTC().Unix()
+	if err := s.write(reg); err != nil {
+		return Registration{}, false, err
+	}
+	return reg, reg.Phase == PhaseHandoffInProgress, nil
 }
 
 func (s *Store) Save(reg Registration) error {
@@ -243,4 +336,42 @@ func (s *Store) write(reg Registration) error {
 
 func (s *Store) workerLockPath(runID string) string {
 	return filepath.Join(s.dir, runID+".worker.lock")
+}
+
+func (s *Store) createWorkerLock(path string) (bool, error) {
+	record, err := json.Marshal(workerLockRecord{PID: os.Getpid(), StartedAt: time.Now().UTC()})
+	if err != nil {
+		return false, fmt.Errorf("encode worker lock: %w", err)
+	}
+	if err := os.WriteFile(path, record, 0o600); err != nil {
+		return false, fmt.Errorf("create worker lock: %w", err)
+	}
+	return true, nil
+}
+
+func (s *Store) tryWorkerLock(runID string) (*os.File, bool, error) {
+	file, err := os.OpenFile(s.workerLockPath(runID), os.O_RDWR, 0o600)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("open worker lock: %w", err)
+	}
+	if err := tryLockStoreFile(file); err != nil {
+		_ = file.Close()
+		return nil, false, nil
+	}
+	return file, true, nil
+}
+
+func (s *Store) workerLockExpired(path string) bool {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var record workerLockRecord
+		if json.Unmarshal(data, &record) == nil && !record.StartedAt.IsZero() {
+			return time.Since(record.StartedAt) >= workerStartGrace
+		}
+	}
+	info, err := os.Stat(path)
+	return err == nil && time.Since(info.ModTime()) >= workerStartGrace
 }

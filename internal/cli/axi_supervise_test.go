@@ -1,8 +1,18 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/supervision"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/spf13/cobra"
 )
 
 func TestCanonicalSupervisorCWD(t *testing.T) {
@@ -41,5 +51,166 @@ func TestSupervisorEnvReplacesExistingNMHome(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("NM_HOME count = %d, want 1", count)
+	}
+}
+
+func TestAxiSuperviseArmBindsLinkedWorktree(t *testing.T) {
+	main := setupTestRepo(t)
+	linked := filepath.Join(t.TempDir(), "linked")
+	run(t, main, "git", "worktree", "add", "-b", "feature/linked", linked)
+	linkedRoot, err := filepath.EvalSymlinks(linked)
+	if err != nil {
+		linkedRoot = linked
+	}
+	mainRoot, err := filepath.EvalSymlinks(main)
+	if err != nil {
+		mainRoot = main
+	}
+	chdir(t, linkedRoot)
+
+	p, err := paths.New()
+	if err != nil {
+		t.Fatalf("paths.New() error = %v", err)
+	}
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error = %v", err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepoWithID("repo-1", mainRoot, "origin", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	dbRun, err := database.InsertRun(repo.ID, "feature/linked", "head", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+
+	cmd := &cobra.Command{}
+	cmd.SetContext(context.Background())
+	cmd.SetOut(new(bytes.Buffer))
+	if err := runAxiSuperviseArm(cmd, dbRun.ID); err != nil {
+		t.Fatalf("runAxiSuperviseArm() error = %v", err)
+	}
+	reg, found, err := supervision.NewStore(p.SupervisionDir()).Get(dbRun.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() = (%+v, %v, %v), want registration", reg, found, err)
+	}
+	if reg.CWD != linkedRoot {
+		t.Fatalf("armed cwd = %q, want linked worktree %q", reg.CWD, linkedRoot)
+	}
+}
+
+func TestAxiSuperviseWorkerReleasesClaimAfterResourceFailure(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	p := paths.WithRoot(nmHome)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error = %v", err)
+	}
+	store := supervision.NewStore(p.SupervisionDir())
+	reg, err := store.Arm(supervision.Registration{RunID: "run-1", RepoID: "repo-1", CWD: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Arm() error = %v", err)
+	}
+	reg, claimed, err := store.Claim(reg.CWD, "session-1")
+	if err != nil || !claimed {
+		t.Fatalf("Claim() = (%+v, %v, %v), want claimed registration", reg, claimed, err)
+	}
+	if got, err := store.AcquireWorker(reg.RunID); err != nil || !got {
+		t.Fatalf("AcquireWorker() = (%v, %v), want (true, nil)", got, err)
+	}
+	if err := os.Mkdir(p.DB(), 0o755); err != nil {
+		t.Fatalf("create database blocker: %v", err)
+	}
+	if err := runAxiSuperviseWorker(reg.RunID); err == nil {
+		t.Fatal("runAxiSuperviseWorker() error = nil, want resource failure")
+	}
+	if got, err := store.AcquireWorker(reg.RunID); err != nil || !got {
+		t.Fatalf("AcquireWorker() after resource failure = (%v, %v), want released lock", got, err)
+	}
+	updated, found, err := store.Get(reg.RunID)
+	if err != nil || !found || updated.Phase != supervision.PhaseResumeFailed {
+		t.Fatalf("Get() after resource failure = (%+v, %v, %v), want visible failure", updated, found, err)
+	}
+}
+
+func TestAxiSuperviseWorkerDoesNotResumeUnchangedEventTwice(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	p := paths.WithRoot(nmHome)
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error = %v", err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepoWithID("repo-1", t.TempDir(), "origin", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	dbRun, err := database.InsertRun(repo.ID, "feature/supervise", "head", "base")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
+		t.Fatalf("mark run running: %v", err)
+	}
+	store := supervision.NewStore(p.SupervisionDir())
+	reg, err := store.Arm(supervision.Registration{RunID: dbRun.ID, RepoID: repo.ID, CWD: t.TempDir()})
+	if err != nil {
+		t.Fatalf("Arm() error = %v", err)
+	}
+	reg, claimed, err := store.Claim(reg.CWD, "session-1")
+	if err != nil || !claimed {
+		t.Fatalf("Claim() = (%+v, %v, %v), want claimed registration", reg, claimed, err)
+	}
+
+	previousWatch, previousResume := superviseWatch, superviseResume
+	t.Cleanup(func() {
+		superviseWatch = previousWatch
+		superviseResume = previousResume
+	})
+	superviseWatch = func(string, string, string) error { return nil }
+	resumes := 0
+	superviseResume = func(string, string, string) error {
+		resumes++
+		return nil
+	}
+
+	if got, err := store.AcquireWorker(dbRun.ID); err != nil || !got {
+		t.Fatalf("AcquireWorker() = (%v, %v), want (true, nil)", got, err)
+	}
+	if err := runAxiSuperviseWorker(dbRun.ID); err != nil {
+		t.Fatalf("first runAxiSuperviseWorker() error = %v", err)
+	}
+	reg, found, err := store.Get(dbRun.ID)
+	if err != nil || !found {
+		t.Fatalf("Get() after first worker = (%+v, %v, %v), want registration", reg, found, err)
+	}
+	reg.Phase = supervision.PhaseWatching
+	if err := store.Save(reg); err != nil {
+		t.Fatalf("restore watching state: %v", err)
+	}
+	if got, err := store.AcquireWorker(dbRun.ID); err != nil || !got {
+		t.Fatalf("AcquireWorker() for unchanged event = (%v, %v), want (true, nil)", got, err)
+	}
+	if err := runAxiSuperviseWorker(dbRun.ID); err != nil {
+		t.Fatalf("second runAxiSuperviseWorker() error = %v", err)
+	}
+	if resumes != 1 {
+		t.Fatalf("resume count = %d, want 1 for an unchanged event", resumes)
+	}
+	reg, found, err = store.Get(dbRun.ID)
+	if err != nil || !found || reg.Phase != supervision.PhaseAwaitingUser {
+		t.Fatalf("Get() after unchanged event = (%+v, %v, %v), want awaiting user", reg, found, err)
 	}
 }

@@ -1,8 +1,11 @@
 package supervision
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestStoreArmThenClaimStopHook(t *testing.T) {
@@ -89,5 +92,61 @@ func TestStoreWorkerLockIsExclusive(t *testing.T) {
 	}
 	if got, err := store.AcquireWorker("run-1"); err != nil || !got {
 		t.Fatalf("AcquireWorker() after release = (%v, %v), want (true, nil)", got, err)
+	}
+}
+
+func TestStoreWorkerLockRecoversExpiredStarter(t *testing.T) {
+	store := NewStore(t.TempDir())
+	path := store.workerLockPath("run-1")
+	record, err := json.Marshal(workerLockRecord{PID: 1234, StartedAt: time.Now().Add(-workerStartGrace - time.Second)})
+	if err != nil {
+		t.Fatalf("marshal worker lock record: %v", err)
+	}
+	if err := os.WriteFile(path, record, 0o600); err != nil {
+		t.Fatalf("write stale worker lock: %v", err)
+	}
+
+	got, err := store.AcquireWorker("run-1")
+	if err != nil || !got {
+		t.Fatalf("AcquireWorker() after stale starter = (%v, %v), want (true, nil)", got, err)
+	}
+}
+
+func TestStoreHoldWorkerReleasesMarker(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if got, err := store.AcquireWorker("run-1"); err != nil || !got {
+		t.Fatalf("AcquireWorker() = (%v, %v), want (true, nil)", got, err)
+	}
+	lock, held, err := store.HoldWorker("run-1")
+	if err != nil || !held {
+		t.Fatalf("HoldWorker() = (%v, %v, %v), want held lock", lock, held, err)
+	}
+	if err := lock.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if got, err := store.AcquireWorker("run-1"); err != nil || !got {
+		t.Fatalf("AcquireWorker() after worker release = (%v, %v), want (true, nil)", got, err)
+	}
+}
+
+func TestStoreHandoffRejectsRepeatedFingerprint(t *testing.T) {
+	store := NewStore(t.TempDir())
+	if _, err := store.Arm(Registration{RunID: "run-1", RepoID: "repo-1", CWD: "/work"}); err != nil {
+		t.Fatalf("Arm() error = %v", err)
+	}
+	if _, ok, err := store.Claim("/work", "session-1"); err != nil || !ok {
+		t.Fatalf("Claim() = (_, %v, %v), want claimed registration", ok, err)
+	}
+	first, resume, err := store.Handoff("run-1", "same-event")
+	if err != nil || !resume || first.Phase != PhaseHandoffInProgress {
+		t.Fatalf("first Handoff() = (%+v, %v, %v), want resumable handoff", first, resume, err)
+	}
+	first.Phase = PhaseWatching
+	if err := store.Save(first); err != nil {
+		t.Fatalf("restore watching phase: %v", err)
+	}
+	second, resume, err := store.Handoff("run-1", "same-event")
+	if err != nil || resume || second.Phase != PhaseAwaitingUser {
+		t.Fatalf("repeated Handoff() = (%+v, %v, %v), want non-resuming awaiting user", second, resume, err)
 	}
 }

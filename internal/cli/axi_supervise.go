@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/supervision"
 	"github.com/spf13/cobra"
 	toon "github.com/toon-format/toon-go"
@@ -23,7 +28,10 @@ type codexHookEvent struct {
 	HookEventName string `json:"hook_event_name"`
 }
 
-var superviseResume = resumeCodexSession
+var (
+	superviseResume = resumeCodexSession
+	superviseWatch  = runWatchProcess
+)
 
 func newAxiSuperviseCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "supervise", Short: "Opt-in Codex CLI supervision for one AXI run", SilenceErrors: true, SilenceUsage: true}
@@ -88,10 +96,7 @@ func runAxiSuperviseArm(cmd *cobra.Command, runID string) error {
 	if run == nil || run.RepoID != env.repo.ID || terminalStatus(string(run.Status)) {
 		return emitError(cmd, 1, fmt.Sprintf("run %q is not an active run for this repository", runID))
 	}
-	// Bind to the registered worktree root, not the caller's current subdirectory.
-	// Codex Hook events identify the session workspace, so this avoids a false
-	// mismatch when arm is invoked from a nested path.
-	cwd, err := canonicalSupervisorCWD(env.repo.WorkingPath)
+	cwd, err := supervisorWorktreeRoot()
 	if err != nil {
 		return emitError(cmd, 1, err.Error())
 	}
@@ -208,18 +213,29 @@ func runAxiSuperviseWorker(runID string) error {
 	if runID == "" {
 		return fmt.Errorf("--run is required")
 	}
-	p, d, err := openResources()
+	p, err := paths.New()
 	if err != nil {
 		return err
 	}
-	defer d.Close()
 	store := supervision.NewStore(p.SupervisionDir())
-	defer store.ReleaseWorker(runID)
+	worker, held, err := store.HoldWorker(runID)
+	if err != nil || !held {
+		return err
+	}
+	defer worker.Release()
+	if err := p.EnsureDirs(); err != nil {
+		return recordSupervisorWorkerFailure(store, runID, "open resources: "+err.Error())
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		return recordSupervisorWorkerFailure(store, runID, "open resources: "+err.Error())
+	}
+	defer d.Close()
 	reg, found, err := store.Get(runID)
 	if err != nil || !found || reg.Phase != supervision.PhaseWatching || reg.SessionID == "" {
 		return nil
 	}
-	if err := runWatchProcess(p.Root(), reg.CWD, runID); err != nil {
+	if err := superviseWatch(p.Root(), reg.CWD, runID); err != nil {
 		run, getErr := d.GetRun(runID)
 		if getErr != nil || run == nil || !terminalStatus(string(run.Status)) {
 			reg.Phase, reg.Error = supervision.PhaseResumeFailed, "watch: "+err.Error()
@@ -236,14 +252,20 @@ func runAxiSuperviseWorker(runID string) error {
 		reg.Phase = supervision.PhaseCompleted
 		return store.Save(reg)
 	}
-	reg.Phase = supervision.PhaseHandoffInProgress
-	reg.Fingerprint = fmt.Sprintf("%s|%d|%t", run.Status, run.UpdatedAt, run.AwaitingAgentSince != nil)
-	if err := store.Save(reg); err != nil {
+	steps, err := d.GetStepsByRun(runID)
+	if err != nil {
+		return fmt.Errorf("load watched run steps: %w", err)
+	}
+	reg, resume, err := store.Handoff(runID, supervisorFingerprint(run, steps))
+	if err != nil {
 		return err
+	}
+	if !resume {
+		return nil
 	}
 	// Release before resume: the resumed turn's Stop hook must be able to start
 	// the next watch phase after it sends axi respond or asks Simon a question.
-	if err := store.ReleaseWorker(runID); err != nil {
+	if err := worker.Release(); err != nil {
 		return err
 	}
 	if err := superviseResume(reg.CWD, reg.SessionID, runID); err != nil {
@@ -268,7 +290,8 @@ func runWatchProcess(nmHome, cwd, runID string) error {
 	cmd.Dir = cwd
 	cmd.Env = supervisorEnv(nmHome)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = devNull, devNull, nil
-	if err := cmd.Run(); err != nil {
+	shellenv.ConfigureShellCommand(cmd)
+	if err := shellenv.RunShellCommand(cmd); err != nil {
 		return fmt.Errorf("watch process: %w", err)
 	}
 	return nil
@@ -285,10 +308,46 @@ func resumeCodexSession(cwd, sessionID, runID string) error {
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil {
+	shellenv.ConfigureShellCommand(cmd)
+	if err := shellenv.RunShellCommand(cmd); err != nil {
 		return err
 	}
 	return nil
+}
+
+func supervisorWorktreeRoot() (string, error) {
+	root, err := git.FindGitRoot(".")
+	if err != nil {
+		return "", fmt.Errorf("find current worktree root: %w", err)
+	}
+	return canonicalSupervisorCWD(root)
+}
+
+func recordSupervisorWorkerFailure(store *supervision.Store, runID, message string) error {
+	reg, found, err := store.Get(runID)
+	if err == nil && found {
+		reg.Phase, reg.Error = supervision.PhaseResumeFailed, message
+		_ = store.Save(reg)
+	}
+	return fmt.Errorf("%s", message)
+}
+
+func supervisorFingerprint(run *db.Run, steps []*db.StepResult) string {
+	var state strings.Builder
+	state.WriteString(string(run.Status))
+	state.WriteByte('|')
+	state.WriteString(fmt.Sprintf("%d|%t", run.UpdatedAt, run.AwaitingAgentSince != nil))
+	for _, step := range steps {
+		state.WriteByte('|')
+		state.WriteString(string(step.StepName))
+		state.WriteByte(':')
+		state.WriteString(string(step.Status))
+		if step.LastActivityAt != nil {
+			state.WriteString(fmt.Sprintf(":%d", *step.LastActivityAt))
+		}
+	}
+	sum := sha256.Sum256([]byte(state.String()))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func canonicalSupervisorCWD(value string) (string, error) {
