@@ -205,6 +205,24 @@ func TestGetPRHeadPassesRepoFlag(t *testing.T) {
 	}
 }
 
+func TestGetPRBaseBranchPassesRepoFlag(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json baseRefName --jq .baseRefName": {
+			stdout: "release/2026\n",
+		},
+	}), nil, "", "test/repo")
+
+	base, err := host.getPRBaseBranch(context.Background(), &scm.PR{Number: "123"})
+	if err != nil {
+		t.Fatalf("getPRBaseBranch() error = %v", err)
+	}
+	if base != "release/2026" {
+		t.Fatalf("getPRBaseBranch() = %q, want release/2026", base)
+	}
+}
+
 func TestGetChecksParsesCompletedAt(t *testing.T) {
 	t.Parallel()
 
@@ -234,6 +252,7 @@ func TestGetChecksParsesCompletedAt(t *testing.T) {
 func TestGetChecksKeepsUnprotectedLinklessLegacyPendingBlocking(t *testing.T) {
 	t.Parallel()
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 123 --repo test/repo --json baseRefName --jq .baseRefName":   {stdout: "main\n"},
 		"gh api repos/test/repo/branches/main/protection/required_status_checks": {stderr: "Branch not protected", code: 1},
 		"gh api --paginate repos/test/repo/rules/branches/main":                  {stdout: "[]\n"},
 		"gh api --paginate repos/test/repo/commits/abc/check-runs?per_page=100":  {stdout: `{"check_runs":[{"name":"unit","status":"completed","conclusion":"success"}]}` + "\n"},

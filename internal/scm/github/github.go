@@ -285,9 +285,28 @@ func (h *Host) GetPRHead(ctx context.Context, pr *scm.PR) (string, error) {
 
 func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	if pr != nil && pr.HeadSHA != "" && pr.BaseBranch != "" && githubAPIRepo(h.repo) != "" {
+		if pr.Number != "" {
+			baseBranch, err := h.getPRBaseBranch(ctx, pr)
+			if err != nil {
+				return nil, err
+			}
+			if baseBranch != "" {
+				pr.BaseBranch = baseBranch
+			}
+		}
 		return h.getChecksWithProvenance(ctx, pr)
 	}
 	return h.getChecksFromPR(ctx, pr)
+}
+
+func (h *Host) getPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
+	args := append([]string{"pr", "view", pr.Number}, h.repoArgs()...)
+	args = append(args, "--json", "baseRefName", "--jq", ".baseRefName")
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr view base branch: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // getChecksFromPR is the compatibility path for providers and callers that

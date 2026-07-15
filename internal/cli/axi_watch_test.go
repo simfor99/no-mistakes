@@ -32,6 +32,15 @@ func TestWaitForWatchSignalReconcilesCIStatusChunk(t *testing.T) {
 	}
 }
 
+func TestWaitForWatchSignalReconcilesMultilineCIStatusChunk(t *testing.T) {
+	message := "unrelated progress\n" + cimonitor.ChecksPassedMsg
+	events := make(chan ipc.Event, 1)
+	events <- ipc.Event{Type: ipc.EventLogChunk, Content: &message}
+	if got := waitForWatchSignal(context.Background(), events, nil); got != watchSignalEvent {
+		t.Fatalf("waitForWatchSignal() = %v, want CI status event", got)
+	}
+}
+
 func TestWaitForWatchSignalKeepsTimerAfterLogChunk(t *testing.T) {
 	events := make(chan ipc.Event, 1)
 	events <- ipc.Event{Type: ipc.EventLogChunk}

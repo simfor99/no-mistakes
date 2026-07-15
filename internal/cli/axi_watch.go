@@ -142,6 +142,8 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) error {
 			return reconcileClosedWatchStream(cmd, ctx, read)
 		case watchSignalEvent:
 			attentionLatched = false
+		case watchSignalTimer:
+			// Re-evaluate the current run state after the quiet-period timer.
 		}
 	}
 }
@@ -171,7 +173,7 @@ func watchEventRequiresReconciliation(event ipc.Event) bool {
 	if event.Content == nil {
 		return false
 	}
-	return cimonitor.ParseActivity([]string{strings.TrimSpace(*event.Content)}).LastEvent != ""
+	return cimonitor.ParseActivity(strings.Split(*event.Content, "\n")).LastEvent != ""
 }
 
 func latchWatchAttention(until watchUntil, reason string) bool {
