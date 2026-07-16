@@ -4,7 +4,9 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,15 +39,20 @@ func axiScenario(t *testing.T) string {
           line: 1
           description: "potential nil deref"
           action: ask-user
+          review_scope: source
       summary: "found 1 issue"
       risk_level: medium
       risk_rationale: "warning requires human review"
+      risk_scope: source-or-external
+      tested: ["fakeagent: simulated review"]
+      testing_summary: "simulated review found a user decision"
   - text: "no issues found"
     structured:
       findings: []
       summary: "no issues found"
       risk_level: low
       risk_rationale: "no risks detected in the diff"
+      risk_scope: source-or-external
       tested:
         - "fakeagent: simulated test run"
       testing_summary: "simulated tests passed"
@@ -87,15 +94,20 @@ func branchSyncScenario(t *testing.T) string {
           line: 1
           description: "unsafe value needs validation"
           action: auto-fix
+          review_scope: source
       summary: "found one issue"
       risk_level: medium
       risk_rationale: "the unsafe value needs a guard"
+      risk_scope: source-or-external
+      tested: ["fakeagent: simulated review"]
+      testing_summary: "simulated review found a technical fix"
   - text: "no issues found"
     structured:
       findings: []
       summary: "no issues found"
       risk_level: low
       risk_rationale: "no remaining risk"
+      risk_scope: source-or-external
       tested: ["fakeagent: focused verification"]
       testing_summary: "simulated tests passed"
       title: "feat: branch sync"
@@ -105,6 +117,239 @@ func branchSyncScenario(t *testing.T) string {
 		t.Fatalf("write branch sync scenario: %v", err)
 	}
 	return path
+}
+
+// TestAxiNativeAgentSupervisionJourney exercises the opt-in Stop-hook path
+// through the real CLI, daemon, and persisted registration state. It covers
+// both provider payloads: an unrelated event cannot claim the armed run, a
+// technical gate emits one continuation, repeats are quiet, a terminal run
+// closes the registration, and an ask-user gate never continues the session.
+func TestAxiNativeAgentSupervisionJourney(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		provider := provider
+		t.Run(provider+"/technical-and-terminal", func(t *testing.T) {
+			h := NewHarness(t, SetupOpts{Agent: provider, Scenario: branchSyncScenario(t)})
+			initSupervisionHarness(t, h, "init-supervision-technical")
+
+			h.CommitChange("feature/supervision-technical", "feature.txt", "unsafe\n", "add supervised feature")
+			worktree := h.AddWorktree("feature/supervision-technical")
+			gateOut, err := h.RunInDir(worktree, "axi", "run", "--intent", "resolve the technical review finding")
+			if err != nil || !strings.Contains(gateOut, "sync-1") {
+				t.Fatalf("technical review gate: %v\n%s", err, gateOut)
+			}
+			run := waitForStepStatus(t, h, "feature/supervision-technical", types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second)
+			if run == nil {
+				t.Fatal("expected supervised run to wait at the technical review gate")
+			}
+
+			armOut, hook, event := armSupervisor(t, h, worktree, run.ID, provider)
+			assertNativeHookFilesUntouched(t, h)
+			nonStopOut := runAxiHook(t, h, worktree, hook, strings.Replace(event, `"Stop"`, `"PostToolUse"`, 1))
+			armedOut, err := h.RunInDir(worktree, "axi", "supervise", "status", "--run", run.ID)
+			if err != nil || !strings.Contains(armedOut, "supervision: armed") || !strings.Contains(armedOut, "session_bound: false") {
+				t.Fatalf("non-Stop event changed armed registration: %v\n%s", err, armedOut)
+			}
+
+			event = prepareSupervisorStop(t, provider, event)
+			technicalOut := runAxiHook(t, h, worktree, hook, event)
+			if !strings.Contains(technicalOut, `"decision":"block"`) || !strings.Contains(technicalOut, "nm_event=technical_gate") {
+				t.Fatalf("technical Stop hook did not continue the active session:\n%s", technicalOut)
+			}
+			duplicateOut := runAxiHook(t, h, worktree, hook, event)
+			if duplicateOut != "" {
+				t.Fatalf("duplicate Stop hook must be quiet, got:\n%s", duplicateOut)
+			}
+			handoffOut, err := h.RunInDir(worktree, "axi", "supervise", "status", "--run", run.ID)
+			if err != nil || !strings.Contains(handoffOut, "supervision: handoff_in_progress") || !strings.Contains(handoffOut, "session_bound: true") {
+				t.Fatalf("technical handoff status: %v\n%s", err, handoffOut)
+			}
+
+			if abortOut, err := h.RunInDir(worktree, "axi", "abort", "--run", run.ID); err != nil {
+				t.Fatalf("abort supervised technical gate: %v\n%s", err, abortOut)
+			}
+			if terminal := h.WaitForRun("feature/supervision-technical", 60*time.Second); terminal.Status != types.RunCancelled {
+				t.Fatalf("aborted supervised run status = %s, want cancelled", terminal.Status)
+			}
+			terminalEvent := nextSupervisorEvent(t, worktree, provider, event)
+			terminalOut := runAxiHook(t, h, worktree, hook, terminalEvent)
+			if !strings.Contains(terminalOut, `"decision":"block"`) || !strings.Contains(terminalOut, "nm_event=terminal") {
+				t.Fatalf("terminal Stop hook did not return the bounded terminal handoff:\n%s", terminalOut)
+			}
+			completedOut, err := h.RunInDir(worktree, "axi", "supervise", "status", "--run", run.ID)
+			if err != nil || !strings.Contains(completedOut, "supervision: completed") {
+				t.Fatalf("terminal handoff did not complete registration: %v\n%s", err, completedOut)
+			}
+			t.Logf("native supervision CLI transcript (%s):\narm:\n%snon-stop hook: %q\ntechnical hook:\n%sduplicate hook: %q\nterminal hook:\n%sfinal status:\n%s", provider, armOut, nonStopOut, technicalOut, duplicateOut, terminalOut, completedOut)
+		})
+
+		t.Run(provider+"/ask-user-stops", func(t *testing.T) {
+			h := NewHarness(t, SetupOpts{Agent: provider, Scenario: axiScenario(t)})
+			initSupervisionHarness(t, h, "init-supervision-ask")
+
+			h.CommitChange("feature/supervision-ask", "feature.txt", "change\n", "add ask-user feature")
+			worktree := h.AddWorktree("feature/supervision-ask")
+			gateOut, err := h.RunInDir(worktree, "axi", "run", "--intent", "wait for the user decision")
+			if err != nil || !strings.Contains(gateOut, "ask-user") {
+				t.Fatalf("ask-user review gate: %v\n%s", err, gateOut)
+			}
+			run := waitForStepStatus(t, h, "feature/supervision-ask", types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second)
+			if run == nil {
+				t.Fatal("expected supervised run to wait at the ask-user review gate")
+			}
+
+			_, hook, event := armSupervisor(t, h, worktree, run.ID, provider)
+			event = prepareSupervisorStop(t, provider, event)
+			askUserOut := runAxiHook(t, h, worktree, hook, event)
+			if askUserOut != "" {
+				t.Fatalf("ask-user Stop hook must not continue the session, got:\n%s", askUserOut)
+			}
+			statusOut, err := h.RunInDir(worktree, "axi", "supervise", "status", "--run", run.ID)
+			if err != nil || !strings.Contains(statusOut, "supervision: awaiting_user") || !strings.Contains(statusOut, "session_bound: true") {
+				t.Fatalf("ask-user Stop hook status: %v\n%s", err, statusOut)
+			}
+			t.Logf("ask-user supervision CLI transcript (%s):\nhook: %q\nstatus:\n%s", provider, askUserOut, statusOut)
+		})
+
+		t.Run(provider+"/missing-cwd-is-ignored", func(t *testing.T) {
+			h := NewHarness(t, SetupOpts{Agent: provider, Scenario: branchSyncScenario(t)})
+			initSupervisionHarness(t, h, "init-supervision-missing-cwd")
+
+			h.CommitChange("feature/supervision-missing-cwd", "feature.txt", "unsafe\n", "add missing-cwd feature")
+			worktree := h.AddWorktree("feature/supervision-missing-cwd")
+			if gateOut, err := h.RunInDir(worktree, "axi", "run", "--intent", "ignore incomplete hook events"); err != nil || !strings.Contains(gateOut, "sync-1") {
+				t.Fatalf("technical review gate: %v\n%s", err, gateOut)
+			}
+			run := waitForStepStatus(t, h, "feature/supervision-missing-cwd", types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second)
+			if run == nil {
+				t.Fatal("expected missing-cwd run to wait at the technical review gate")
+			}
+			_, hook, event := armSupervisor(t, h, worktree, run.ID, provider)
+			event = prepareSupervisorStop(t, provider, supervisorEventWithoutCWD(t, event))
+			missingCWDOut := runAxiHook(t, h, worktree, hook, event)
+			statusOut, err := h.RunInDir(worktree, "axi", "supervise", "status", "--run", run.ID)
+			if err != nil || missingCWDOut != "" || !strings.Contains(statusOut, "supervision: armed") || !strings.Contains(statusOut, "session_bound: false") {
+				t.Fatalf("incomplete Stop payload must leave the registration armed and emit nothing: err=%v hook=%q status:\n%s", err, missingCWDOut, statusOut)
+			}
+		})
+	}
+}
+
+func initSupervisionHarness(t *testing.T, h *Harness, branch string) {
+	t.Helper()
+	h.CommitChange(branch, "seed.txt", "seed\n", "seed supervision init")
+	if out, err := h.RunInDir(h.AddWorktree(branch), "init"); err != nil {
+		t.Fatalf("init supervision harness: %v\n%s", err, out)
+	}
+}
+
+func armSupervisor(t *testing.T, h *Harness, worktree, runID, provider string) (string, string, string) {
+	t.Helper()
+	args := []string{"axi", "supervise", "arm", "--run", runID}
+	hook := "codex-hook"
+	event := `{"hook_event_name":"Stop","session_id":"session-supervised","turn_id":"turn-one","cwd":"` + worktree + `"}`
+	if provider == "claude" {
+		transcript := filepath.Join(worktree, "supervision-transcript.jsonl")
+		if err := os.WriteFile(transcript, nil, 0o600); err != nil {
+			t.Fatalf("write Claude transcript: %v", err)
+		}
+		args = append(args, "--claude-transcript", transcript)
+		hook = "claude-hook"
+		event = `{"hook_event_name":"Stop","session_id":"session-supervised","transcript_path":"` + transcript + `","cwd":"` + worktree + `","last_assistant_message":"supervision complete"}`
+	}
+	out, err := h.RunInDir(worktree, args...)
+	if err != nil || !strings.Contains(out, "supervision: armed") || !strings.Contains(out, "hook_required: true") {
+		t.Fatalf("arm supervision: %v\n%s", err, out)
+	}
+	return out, hook, event
+}
+
+func nextSupervisorEvent(t *testing.T, worktree, provider, event string) string {
+	t.Helper()
+	if provider == "codex" {
+		return strings.Replace(event, "turn-one", "turn-two", 1)
+	}
+	var payload struct {
+		TranscriptPath string `json:"transcript_path"`
+	}
+	if err := json.Unmarshal([]byte(event), &payload); err != nil {
+		t.Fatalf("decode Claude test event: %v", err)
+	}
+	file, err := os.OpenFile(payload.TranscriptPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("append Claude transcript: %v", err)
+	}
+	if _, err := file.WriteString(`{"type":"assistant","uuid":"turn-two","message":{"content":"supervision complete"}}` + "\n"); err != nil {
+		_ = file.Close()
+		t.Fatalf("write second Claude transcript entry: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close Claude transcript: %v", err)
+	}
+	return event
+}
+
+func prepareSupervisorStop(t *testing.T, provider, event string) string {
+	t.Helper()
+	if provider != "claude" {
+		return event
+	}
+	var payload struct {
+		TranscriptPath string `json:"transcript_path"`
+	}
+	if err := json.Unmarshal([]byte(event), &payload); err != nil {
+		t.Fatalf("decode Claude test event: %v", err)
+	}
+	file, err := os.OpenFile(payload.TranscriptPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("append Claude transcript: %v", err)
+	}
+	if _, err := file.WriteString(`{"type":"assistant","uuid":"turn-one","message":{"content":"supervision complete"}}` + "\n"); err != nil {
+		_ = file.Close()
+		t.Fatalf("write Claude transcript entry: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close Claude transcript: %v", err)
+	}
+	return event
+}
+
+func supervisorEventWithoutCWD(t *testing.T, event string) string {
+	t.Helper()
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(event), &payload); err != nil {
+		t.Fatalf("decode test hook event: %v", err)
+	}
+	delete(payload, "cwd")
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("encode missing-cwd hook event: %v", err)
+	}
+	return string(raw)
+}
+
+func runAxiHook(t *testing.T, h *Harness, worktree, hook, event string) string {
+	t.Helper()
+	cmd := exec.Command(h.NMBin, "axi", hook)
+	cmd.Dir = worktree
+	cmd.Env = os.Environ()
+	cmd.Stdin = strings.NewReader(event)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run %s: %v\n%s", hook, err, out)
+	}
+	return string(out)
+}
+
+func assertNativeHookFilesUntouched(t *testing.T, h *Harness) {
+	t.Helper()
+	for _, path := range []string{
+		filepath.Join(h.HomeDir, ".codex", "hooks.json"),
+		filepath.Join(h.HomeDir, ".claude", "settings.json"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("supervision must not create or change local hook configuration %s: %v", path, err)
+		}
+	}
 }
 
 // TestAxiBranchSyncJourney reproduces the end-user stale-local journey with the

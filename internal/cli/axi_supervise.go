@@ -256,7 +256,7 @@ func runAxiCodexHook(in io.Reader, out io.Writer) error {
 	if err := json.NewDecoder(io.LimitReader(in, 64<<10)).Decode(&event); err != nil {
 		return nil
 	}
-	if event.HookEventName != "Stop" || strings.TrimSpace(event.SessionID) == "" || strings.TrimSpace(event.TurnID) == "" {
+	if event.HookEventName != "Stop" || strings.TrimSpace(event.SessionID) == "" || strings.TrimSpace(event.TurnID) == "" || strings.TrimSpace(event.CWD) == "" {
 		return nil
 	}
 	return runAxiSupervisorHook(supervisorHookEvent{SessionID: event.SessionID, HandoffID: event.TurnID, CWD: event.CWD}, out)
@@ -270,7 +270,7 @@ func runAxiClaudeHook(in io.Reader, out io.Writer) error {
 	if err := json.NewDecoder(io.LimitReader(in, 64<<10)).Decode(&event); err != nil {
 		return nil
 	}
-	if event.HookEventName != "Stop" || strings.TrimSpace(event.SessionID) == "" {
+	if event.HookEventName != "Stop" || strings.TrimSpace(event.SessionID) == "" || strings.TrimSpace(event.CWD) == "" {
 		return nil
 	}
 	if strings.TrimSpace(event.LastAssistantMessage) == "" {
