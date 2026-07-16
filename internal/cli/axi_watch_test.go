@@ -3,11 +3,14 @@ package cli
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
@@ -58,6 +61,29 @@ func TestWatchQuietDelayUsesNearestActiveStep(t *testing.T) {
 
 	if got := watchQuietDelay(rv, 10*time.Second); got != 5*time.Second {
 		t.Fatalf("watchQuietDelay() = %v, want 5s", got)
+	}
+}
+
+func TestWatchRunViewUsesLogActivityFallback(t *testing.T) {
+	previous := watchNow
+	watchNow = func() time.Time { return time.Unix(1_000, 0) }
+	t.Cleanup(func() { watchNow = previous })
+
+	p := paths.WithRoot(t.TempDir())
+	if err := os.MkdirAll(p.RunLogDir("run-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(p.RunLogDir("run-1"), "review.log")
+	if err := os.WriteFile(logPath, []byte("legacy activity\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(logPath, time.Unix(990, 0), time.Unix(990, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	run := &ipc.RunInfo{ID: "run-1", Status: types.RunRunning, Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: types.StepStatusRunning}}}
+	if done, reason := watchReason(watchRunView(p, run), 10*time.Second, func(string) []string { return nil }); !done || reason != "quiet" {
+		t.Fatalf("watchReason() = (%v, %q), want (true, quiet)", done, reason)
 	}
 }
 

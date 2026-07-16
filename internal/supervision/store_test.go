@@ -88,7 +88,7 @@ func TestStoreRecoversFromStaleClaimLockFile(t *testing.T) {
 	}
 }
 
-func TestStorePrepareHandoffDeduplicatesTurnAndFingerprint(t *testing.T) {
+func TestStorePrepareHandoffDeduplicatesTurn(t *testing.T) {
 	store := NewStore(t.TempDir())
 	if _, err := store.Arm(Registration{RunID: "run-1", RepoID: "repo-1", CWD: "/work"}); err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestStorePrepareHandoffDeduplicatesTurnAndFingerprint(t *testing.T) {
 	if first.LastHandoffTurnID != "turn-1" || first.LastHandoffFingerprint != "heartbeat-1" {
 		t.Fatalf("first handoff fields = %+v", first)
 	}
-	_, emitted, err = store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-1", "progress-1", PhaseHandoffInProgress, 124, 2)
+	_, emitted, err = store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-2", "progress-2", PhaseHandoffInProgress, 124, 2)
 	if err != nil || emitted {
 		t.Fatalf("duplicate PrepareHandoff() emitted=%v err=%v, want false nil", emitted, err)
 	}

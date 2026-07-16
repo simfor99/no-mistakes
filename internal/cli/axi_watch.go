@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
@@ -94,8 +95,8 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) (string, string, 
 	read := func() (*ipc.RunInfo, error) { return getRunInfo(client, runID) }
 	if run, err := read(); err != nil {
 		return watchErrorFingerprint(until, "read-error"), "", emitError(cmd, 1, fmt.Sprintf("read run: %v", err))
-	} else if done, reason := watchReason(run, cfg.StepQuietWarning, ciLogReader(p)); done && until == watchUntilAttention {
-		rv := runViewFromIPC(run)
+	} else if done, reason := watchReason(watchRunView(p, run), cfg.StepQuietWarning, ciLogReader(p)); done && until == watchUntilAttention {
+		rv := watchRunView(p, run)
 		return watchResultFingerprint(until, rv, reason), "", renderWatchResult(cmd, rv, reason)
 	}
 	events, cancel, err := ipc.SubscribeContext(ctx, p.Socket(), &ipc.SubscribeParams{RunID: runID})
@@ -112,8 +113,8 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) (string, string, 
 		if err != nil {
 			return watchErrorFingerprint(until, "read-error"), "", emitError(cmd, 1, fmt.Sprintf("read run: %v", err))
 		}
-		if done, reason := watchReason(run, cfg.StepQuietWarning, ciLogReader(p)); done {
-			rv := runViewFromIPC(run)
+		rv := watchRunView(p, run)
+		if done, reason := watchReason(rv, cfg.StepQuietWarning, ciLogReader(p)); done {
 			if reason == "terminal" {
 				return watchResultFingerprint(until, rv, reason), "", renderWatchResult(cmd, rv, reason)
 			}
@@ -159,8 +160,13 @@ func watchErrorFingerprint(until watchUntil, outcome string) string {
 	return string(until) + "|" + outcome
 }
 
-func watchReason(run *ipc.RunInfo, quiet time.Duration, logs func(string) []string) (bool, string) {
+func watchRunView(p *paths.Paths, run *ipc.RunInfo) runView {
 	rv := runViewFromIPC(run)
+	applyLastActivityFallback(p, &rv)
+	return rv
+}
+
+func watchReason(rv runView, quiet time.Duration, logs func(string) []string) (bool, string) {
 	for i := range rv.Steps {
 		rv.Steps[i].QuietWarning = quiet
 	}
@@ -170,7 +176,7 @@ func watchReason(run *ipc.RunInfo, quiet time.Duration, logs func(string) []stri
 	if _, ok := rv.awaitingStep(); ok {
 		return true, "gate"
 	}
-	if ciReadyToMerge(rv, logs(run.ID)) {
+	if ciReadyToMerge(rv, logs(rv.ID)) {
 		return true, "checks-passed"
 	}
 	if watchQuietDelay(rv, quiet) == 0 {
