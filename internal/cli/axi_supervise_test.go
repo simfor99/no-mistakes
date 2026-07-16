@@ -50,6 +50,36 @@ func TestSupervisorHeartbeatDeadlineReusesFutureRegistrationDeadline(t *testing.
 	}
 }
 
+func TestAxiSuperviseStatusRendersPersistedRegistration(t *testing.T) {
+	p, err := paths.New()
+	if err != nil {
+		t.Fatalf("paths.New() error = %v", err)
+	}
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatalf("EnsureDirs() error = %v", err)
+	}
+	if _, err := supervision.NewStore(p.SupervisionDir()).Arm(supervision.Registration{
+		RunID: "run-supervise-status", RepoID: "repo-status", CWD: "/work/status",
+	}); err != nil {
+		t.Fatalf("Arm() error = %v", err)
+	}
+
+	output, err := executeCmd("axi", "supervise", "status", "--run", "run-supervise-status")
+	if err != nil {
+		t.Fatalf("axi supervise status error = %v", err)
+	}
+	for _, want := range []string{
+		"supervision: armed",
+		"run_id: run-supervise-status",
+		"session_bound: false",
+		"stale_heartbeats: 0",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("axi supervise status output missing %q in:\n%s", want, output)
+		}
+	}
+}
+
 func TestCodexHookIgnoresNonStopEvents(t *testing.T) {
 	if err := runAxiCodexHook(strings.NewReader(`{"hook_event_name":"PostToolUse","session_id":"s","turn_id":"t","cwd":"/tmp"}`), io.Discard); err != nil {
 		t.Fatalf("runAxiCodexHook() error = %v", err)

@@ -153,7 +153,7 @@ func runAxiSuperviseStatus(cmd *cobra.Command, runID string) error {
 		return emitError(cmd, 1, "no local supervision is registered for this run")
 	}
 	fields := []toon.Field{
-		toonField("supervision", reg.Phase),
+		toonField("supervision", string(reg.Phase)),
 		toonField("run_id", reg.RunID),
 		toonField("session_bound", reg.SessionID != ""),
 		toonField("stale_heartbeats", reg.StaleHeartbeats),
