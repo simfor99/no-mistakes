@@ -127,7 +127,7 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) (string, string, 
 		}
 		var timer <-chan time.Time
 		if !quietLatched {
-			if delay := watchQuietDelay(runViewFromIPC(run), cfg.StepQuietWarning); delay >= 0 {
+			if delay := watchQuietDelay(rv, cfg.StepQuietWarning); delay >= 0 {
 				timer = time.After(delay)
 			}
 		}

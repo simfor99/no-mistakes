@@ -87,6 +87,33 @@ func TestWatchRunViewUsesLogActivityFallback(t *testing.T) {
 	}
 }
 
+func TestWatchRunViewSchedulesQuietTimerFromLogActivityFallback(t *testing.T) {
+	previous := watchNow
+	watchNow = func() time.Time { return time.Unix(1_000, 0) }
+	t.Cleanup(func() { watchNow = previous })
+
+	p := paths.WithRoot(t.TempDir())
+	if err := os.MkdirAll(p.RunLogDir("run-1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(p.RunLogDir("run-1"), "review.log")
+	if err := os.WriteFile(logPath, []byte("legacy activity\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(logPath, time.Unix(995, 0), time.Unix(995, 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	run := &ipc.RunInfo{ID: "run-1", Status: types.RunRunning, Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: types.StepStatusRunning}}}
+	rv := watchRunView(p, run)
+	if done, reason := watchReason(rv, 10*time.Second, func(string) []string { return nil }); done || reason != "" {
+		t.Fatalf("watchReason() = (%v, %q), want (false, empty)", done, reason)
+	}
+	if got := watchQuietDelay(rv, 10*time.Second); got != 5*time.Second {
+		t.Fatalf("watchQuietDelay() = %v, want 5s", got)
+	}
+}
+
 func TestWatchResultFingerprintIncludesStopOutcomeAndRunState(t *testing.T) {
 	rv := runView{ID: "run-1", Branch: "feature/watch", Status: "running", Steps: []stepView{{Name: "ci", Status: "running"}}}
 	baseline := watchResultFingerprint(watchUntilAttention, rv, "quiet")
