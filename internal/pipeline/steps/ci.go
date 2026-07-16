@@ -43,13 +43,14 @@ const (
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, auto-fixing CI failures.
 type CIStep struct {
-	lastFixedChecks      string               // sorted check names from last fix attempt, to avoid re-fixing
-	lastFixedCompletedAt map[string]time.Time // failing check completion times seen before the last fix attempt
-	ciFixAttempts        int                  // number of CI auto-fix attempts made
-	checksGracePeriod    time.Duration        // minimum wait before trusting empty CI checks (0 = default 60s)
-	pollIntervalOverride time.Duration        // if set, overrides computed poll interval (for testing)
-	waitForNextPoll      func(context.Context, time.Duration) error
-	now                  func() time.Time
+	lastFixedChecks           string               // sorted check names from last fix attempt, to avoid re-fixing
+	lastFixedCompletedAt      map[string]time.Time // failing check completion times seen before the last fix attempt
+	ciFixAttempts             int                  // number of CI auto-fix attempts made
+	checksGracePeriod         time.Duration        // minimum wait before trusting empty CI checks (0 = default 60s)
+	queuedCheckAttentionAfter time.Duration        // test override; 0 uses global config
+	pollIntervalOverride      time.Duration        // if set, overrides computed poll interval (for testing)
+	waitForNextPoll           func(context.Context, time.Duration) error
+	now                       func() time.Time
 	// baseBranchTip resolves the current tip SHA of the upstream default
 	// branch. The bool is false when the SHA is a fallback/unknown value and
 	// must not re-arm the timeout. Overridable for testing; defaults to
@@ -118,6 +119,16 @@ func (s *CIStep) gracePeriod() time.Duration {
 		return s.checksGracePeriod
 	}
 	return defaultChecksGracePeriod
+}
+
+func (s *CIStep) queuedAttentionAfter(sctx *pipeline.StepContext) time.Duration {
+	if s.queuedCheckAttentionAfter > 0 {
+		return s.queuedCheckAttentionAfter
+	}
+	if sctx.Config != nil && sctx.Config.CIQueueStallAfter > 0 {
+		return sctx.Config.CIQueueStallAfter
+	}
+	return config.DefaultCIQueuedCheckAttentionAfter
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
@@ -205,6 +216,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	lastMonitorLog := ""
 	headDriftLogged := false
 	headReconciled := false
+	queuedChecksSince := time.Time{}
+	queuedChecksSignature := ""
+	queuedChecksCreatedAt := time.Time{}
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
@@ -325,6 +339,25 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
 			} else {
 				pending := hasPendingChecks(checks)
+				queuedNames, queuedCreatedAt, onlyQueued := queuedPendingChecks(checks)
+				if onlyQueued {
+					if queuedChecksSignature != queuedNames || !queuedChecksCreatedAt.Equal(queuedCreatedAt) {
+						queuedChecksSignature = queuedNames
+						queuedChecksCreatedAt = queuedCreatedAt
+						queuedChecksSince = now()
+						if !queuedCreatedAt.IsZero() && queuedCreatedAt.Before(queuedChecksSince) {
+							queuedChecksSince = queuedCreatedAt
+						}
+					}
+					if queuedFor := now().Sub(queuedChecksSince); queuedFor >= s.queuedAttentionAfter(sctx) {
+						sctx.Log(fmt.Sprintf("CI checks stayed queued without starting for %s; waiting for attention", queuedFor.Round(time.Second)))
+						return ciQueuedChecksOutcome(queuedNames, queuedFor), nil
+					}
+				} else {
+					queuedChecksSince = time.Time{}
+					queuedChecksSignature = ""
+					queuedChecksCreatedAt = time.Time{}
+				}
 				failing := failingCheckNames(checks)
 				sort.Strings(failing)
 				hasFailures := len(failing) > 0

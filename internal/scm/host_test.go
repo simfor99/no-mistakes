@@ -45,13 +45,15 @@ func TestCheckBucketHelpers(t *testing.T) {
 		check       Check
 		wantFailing bool
 		wantPending bool
+		wantQueued  bool
 	}{
-		{"pass", Check{Bucket: CheckBucketPass}, false, false},
-		{"fail", Check{Bucket: CheckBucketFail}, true, false},
-		{"pending", Check{Bucket: CheckBucketPending}, false, true},
-		{"legacy pending", Check{Bucket: CheckBucketPending}, false, true},
-		{"cancel", Check{Bucket: CheckBucketCancel}, false, false},
-		{"skip", Check{Bucket: CheckBucketSkip}, false, false},
+		{"pass", Check{Bucket: CheckBucketPass}, false, false, false},
+		{"fail", Check{Bucket: CheckBucketFail}, true, false, false},
+		{"pending", Check{Bucket: CheckBucketPending}, false, true, false},
+		{"queued", Check{Bucket: CheckBucketPending, Progress: CheckProgressQueued}, false, true, true},
+		{"legacy pending", Check{Bucket: CheckBucketPending}, false, true, false},
+		{"cancel", Check{Bucket: CheckBucketCancel}, false, false, false},
+		{"skip", Check{Bucket: CheckBucketSkip}, false, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -60,6 +62,9 @@ func TestCheckBucketHelpers(t *testing.T) {
 			}
 			if got := tt.check.Pending(); got != tt.wantPending {
 				t.Errorf("Pending() = %v, want %v", got, tt.wantPending)
+			}
+			if got := tt.check.Queued(); got != tt.wantQueued {
+				t.Errorf("Queued() = %v, want %v", got, tt.wantQueued)
 			}
 		})
 	}

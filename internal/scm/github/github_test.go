@@ -88,7 +88,7 @@ func TestGetChecksPassesRepoFlag(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt": {
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,startedAt,completedAt": {
 			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass"}]` + "\n",
 		},
 	}), nil, "", "test/repo")
@@ -170,7 +170,7 @@ func TestGetChecksFallsBackToStateWhenBucketMissing(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --json name,state,bucket,completedAt": {
+		"gh pr checks 123 --json name,state,bucket,startedAt,completedAt": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":""},{"name":"tests","state":"PENDING","bucket":""}]` + "\n",
 		},
 	}), nil, "", "")
@@ -227,7 +227,7 @@ func TestGetChecksParsesCompletedAt(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --json name,state,bucket,completedAt": {
+		"gh pr checks 123 --json name,state,bucket,startedAt,completedAt": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":"fail","completedAt":"2026-04-24T04:15:00Z"},{"name":"tests","state":"SUCCESS","bucket":"pass","completedAt":"not-a-time"}]` + "\n",
 		},
 	}), nil, "", "")
@@ -246,6 +246,33 @@ func TestGetChecksParsesCompletedAt(t *testing.T) {
 	}
 	if !checks[1].CompletedAt.IsZero() {
 		t.Fatalf("checks[1].CompletedAt = %v, want zero time for invalid timestamp", checks[1].CompletedAt)
+	}
+}
+
+func TestGetChecksWithProvenancePreservesQueuedProgressAndCreationTime(t *testing.T) {
+	t.Parallel()
+
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/branches/main/protection/required_status_checks": {stderr: "Branch not protected", code: 1},
+		"gh api --paginate repos/test/repo/rules/branches/main":                  {stdout: "[]\n"},
+		"gh api --paginate repos/test/repo/commits/abc/check-runs?per_page=100":  {stdout: `{"check_runs":[{"name":"CodeRabbit","status":"queued","created_at":"2026-07-16T06:44:20Z"}]}` + "\n"},
+		"gh api --paginate repos/test/repo/commits/abc/statuses?per_page=100":    {stdout: "[]\n"},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{HeadSHA: "abc", BaseBranch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("checks = %+v, want one queued check", checks)
+	}
+	check := checks[0]
+	if !check.Queued() {
+		t.Fatalf("check = %+v, want explicitly queued", check)
+	}
+	wantCreatedAt := time.Date(2026, time.July, 16, 6, 44, 20, 0, time.UTC)
+	if !check.CreatedAt.Equal(wantCreatedAt) {
+		t.Fatalf("check.CreatedAt = %v, want %v", check.CreatedAt, wantCreatedAt)
 	}
 }
 

@@ -34,6 +34,8 @@ agent_args_override:
 
 ci_timeout: "168h"
 
+ci_queued_check_attention_after: "10m"
+
 step_quiet_warning: "10m"
 
 review_no_progress_timeout: "15m"
@@ -228,6 +230,24 @@ If the PR is merged or closed externally, the stale gate completes automatically
 Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to monitor until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`.
 
 Legacy alias: `babysit_timeout`.
+
+### ci_queued_check_attention_after
+
+How long the CI step may wait when every remaining GitHub check is explicitly
+`queued` and none has started.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `10m`                  |
+
+Accepts any positive Go `time.ParseDuration` string. This is a focused stall
+guard, not a second CI timeout: it applies only when GitHub distinguishes the
+remaining checks as queued. A running check, an unknown provider state, a
+pending legacy status, or a changed queued-check set keeps normal CI monitoring
+in place. When the limit is reached, no-mistakes parks with a clear
+attention-needed finding; it never marks the check passed, cancels it, or
+merges the PR.
 
 ### step_quiet_warning
 

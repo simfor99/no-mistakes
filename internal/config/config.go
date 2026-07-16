@@ -34,6 +34,11 @@ const (
 	// DefaultStepQuietWarning is how long a running/fixing step can go without
 	// a new log or lifecycle activity before AXI status marks it quiet.
 	DefaultStepQuietWarning = 10 * time.Minute
+	// DefaultCIQueuedCheckAttentionAfter bounds how long GitHub checks may stay
+	// explicitly queued without starting before the CI step parks for attention.
+	// It is intentionally separate from ci_timeout: queued external work cannot
+	// make meaningful progress merely by waiting for the full PR monitor budget.
+	DefaultCIQueuedCheckAttentionAfter = 10 * time.Minute
 	// DefaultReviewNoProgressTimeout bounds how long an autonomous review loop
 	// may repeat without a new commit or materially different findings.
 	DefaultReviewNoProgressTimeout = 15 * time.Minute
@@ -60,6 +65,7 @@ type GlobalConfig struct {
 	AgentArgsOverride       map[string][]string `yaml:"agent_args_override"`
 	CITimeout               time.Duration       `yaml:"-"`
 	StepQuietWarning        time.Duration       `yaml:"-"`
+	CIQueueStallAfter       time.Duration       `yaml:"-"`
 	ReviewNoProgressTimeout time.Duration       `yaml:"-"`
 	ReviewMaxDuration       time.Duration       `yaml:"-"`
 	DaemonConnectTimeout    time.Duration       `yaml:"-"`
@@ -86,6 +92,7 @@ type globalConfigRaw struct {
 	DaemonConnectTimeout    string              `yaml:"daemon_connect_timeout"`
 	BabysitTimeout          string              `yaml:"babysit_timeout"`
 	StepQuietWarning        string              `yaml:"step_quiet_warning"`
+	CIQueueStallAfter       string              `yaml:"ci_queued_check_attention_after"`
 	ReviewNoProgressTimeout string              `yaml:"review_no_progress_timeout"`
 	ReviewMaxDuration       string              `yaml:"review_max_duration"`
 	LogLevel                string              `yaml:"log_level"`
@@ -207,6 +214,7 @@ type Config struct {
 	AgentArgsOverride       map[string][]string
 	CITimeout               time.Duration
 	StepQuietWarning        time.Duration
+	CIQueueStallAfter       time.Duration
 	ReviewNoProgressTimeout time.Duration
 	ReviewMaxDuration       time.Duration
 	LogLevel                string
@@ -345,6 +353,12 @@ agent: auto
 # non-positive duration to monitor until the PR is merged, closed, or the run is
 # aborted with: no-mistakes axi abort --run <id>
 ci_timeout: "168h"
+
+# Maximum time explicitly queued GitHub checks may remain unstarted before the
+# CI step pauses for attention instead of silently consuming ci_timeout. This
+# guard only applies when every remaining pending check is explicitly queued;
+# checks already running continue under the normal CI monitor.
+ci_queued_check_attention_after: "10m"
 
 # AXI status marks a running/fixing step as quiet when no step log or native
 # agent lifecycle activity has appeared for this long. This is observability
@@ -780,6 +794,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		Agents:                  []types.AgentName{types.AgentAuto},
 		CITimeout:               DefaultCITimeout,
 		StepQuietWarning:        DefaultStepQuietWarning,
+		CIQueueStallAfter:       DefaultCIQueuedCheckAttentionAfter,
 		ReviewNoProgressTimeout: DefaultReviewNoProgressTimeout,
 		ReviewMaxDuration:       DefaultReviewMaxDuration,
 		DaemonConnectTimeout:    DefaultDaemonConnectTimeout,
@@ -845,6 +860,13 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		if d > 0 {
 			cfg.StepQuietWarning = d
 		}
+	}
+	if raw.CIQueueStallAfter != "" {
+		d, err := parsePositiveDuration("ci_queued_check_attention_after", raw.CIQueueStallAfter)
+		if err != nil {
+			return nil, err
+		}
+		cfg.CIQueueStallAfter = d
 	}
 	if raw.ReviewNoProgressTimeout != "" {
 		d, err := parsePositiveDuration("review_no_progress_timeout", raw.ReviewNoProgressTimeout)
@@ -1158,6 +1180,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		AgentArgsOverride:       global.AgentArgsOverride,
 		CITimeout:               global.CITimeout,
 		StepQuietWarning:        global.StepQuietWarning,
+		CIQueueStallAfter:       global.CIQueueStallAfter,
 		ReviewNoProgressTimeout: global.ReviewNoProgressTimeout,
 		ReviewMaxDuration:       global.ReviewMaxDuration,
 		LogLevel:                global.LogLevel,

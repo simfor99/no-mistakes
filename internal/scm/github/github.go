@@ -313,7 +313,7 @@ func (h *Host) getPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) 
 // cannot supply the PR head and base branch needed for source-aware checks.
 func (h *Host) getChecksFromPR(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	args := append([]string{"pr", "checks", pr.Number}, h.repoArgs()...)
-	args = append(args, "--json", "name,state,bucket,completedAt")
+	args = append(args, "--json", "name,state,bucket,startedAt,completedAt")
 	cmd := h.cmd(ctx, "gh", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -326,6 +326,7 @@ func (h *Host) getChecksFromPR(ctx context.Context, pr *scm.PR) ([]scm.Check, er
 		Name        string `json:"name"`
 		State       string `json:"state"`
 		Bucket      string `json:"bucket"`
+		StartedAt   string `json:"startedAt"`
 		CompletedAt string `json:"completedAt"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
@@ -339,7 +340,13 @@ func (h *Host) getChecksFromPR(ctx context.Context, pr *scm.PR) ([]scm.Check, er
 				completedAt = parsed
 			}
 		}
-		checks = append(checks, scm.Check{Name: r.Name, Bucket: normalizeCheckBucket(r.Bucket, r.State), CompletedAt: completedAt})
+		checks = append(checks, scm.Check{
+			Name:        r.Name,
+			Bucket:      normalizeCheckBucket(r.Bucket, r.State),
+			Progress:    normalizeCheckProgress(r.State),
+			CreatedAt:   parseGitHubTime(r.StartedAt),
+			CompletedAt: completedAt,
+		})
 	}
 	return checks, nil
 }
@@ -355,6 +362,7 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 			Status      string `json:"status"`
 			Conclusion  string `json:"conclusion"`
 			CompletedAt string `json:"completed_at"`
+			CreatedAt   string `json:"created_at"`
 			App         struct {
 				ID int64 `json:"id"`
 			} `json:"app"`
@@ -384,7 +392,13 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 					bucket = scm.CheckBucketPending
 				}
 			}
-			checks = append(checks, scm.Check{Name: run.Name, Bucket: bucket, CompletedAt: parseGitHubTime(run.CompletedAt)})
+			checks = append(checks, scm.Check{
+				Name:        run.Name,
+				Bucket:      bucket,
+				Progress:    normalizeCheckProgress(run.Status),
+				CreatedAt:   parseGitHubTime(run.CreatedAt),
+				CompletedAt: parseGitHubTime(run.CompletedAt),
+			})
 			for requirement := range required {
 				if requirement.Context == run.Name && (!requirement.AppBound || requirement.AppID == run.App.ID) {
 					observedRequired[requirement] = true
@@ -503,6 +517,17 @@ func parseGitHubTime(value string) time.Time {
 		return time.Time{}
 	}
 	return parsed
+}
+
+func normalizeCheckProgress(value string) scm.CheckProgress {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "queued":
+		return scm.CheckProgressQueued
+	case "in_progress", "requested", "waiting", "pending":
+		return scm.CheckProgressRunning
+	default:
+		return scm.CheckProgressUnknown
+	}
 }
 
 func requiredStatusCheckName(check requiredStatusCheck) string {

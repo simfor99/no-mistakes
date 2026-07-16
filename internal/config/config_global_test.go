@@ -26,6 +26,9 @@ func TestLoadGlobal_Defaults(t *testing.T) {
 	if cfg.StepQuietWarning != DefaultStepQuietWarning {
 		t.Errorf("step_quiet_warning = %v, want %v", cfg.StepQuietWarning, DefaultStepQuietWarning)
 	}
+	if cfg.CIQueueStallAfter != DefaultCIQueuedCheckAttentionAfter {
+		t.Errorf("ci_queued_check_attention_after = %v, want %v", cfg.CIQueueStallAfter, DefaultCIQueuedCheckAttentionAfter)
+	}
 	if cfg.ReviewNoProgressTimeout != DefaultReviewNoProgressTimeout {
 		t.Errorf("review_no_progress_timeout = %v, want %v", cfg.ReviewNoProgressTimeout, DefaultReviewNoProgressTimeout)
 	}
@@ -58,6 +61,7 @@ func TestEnsureDefaultGlobalConfig_CreatesFile(t *testing.T) {
 		"agent: auto",
 		"ci_timeout:",
 		"step_quiet_warning:",
+		"ci_queued_check_attention_after:",
 		"daemon_connect_timeout:",
 		"log_level: info",
 		"# agent_path_override:",
@@ -87,6 +91,9 @@ func TestEnsureDefaultGlobalConfig_CreatedConfigIsLoadable(t *testing.T) {
 	if cfg.StepQuietWarning != DefaultStepQuietWarning {
 		t.Errorf("step_quiet_warning = %v, want %v", cfg.StepQuietWarning, DefaultStepQuietWarning)
 	}
+	if cfg.CIQueueStallAfter != DefaultCIQueuedCheckAttentionAfter {
+		t.Errorf("ci_queued_check_attention_after = %v, want %v", cfg.CIQueueStallAfter, DefaultCIQueuedCheckAttentionAfter)
+	}
 	if cfg.ReviewNoProgressTimeout != DefaultReviewNoProgressTimeout {
 		t.Errorf("review_no_progress_timeout = %v, want %v", cfg.ReviewNoProgressTimeout, DefaultReviewNoProgressTimeout)
 	}
@@ -114,6 +121,22 @@ func TestLoadGlobal_StepQuietWarning(t *testing.T) {
 	}
 	if cfg.StepQuietWarning != 90*time.Second {
 		t.Fatalf("step_quiet_warning = %v, want 90s", cfg.StepQuietWarning)
+	}
+}
+
+func TestLoadGlobal_CIQueuedCheckAttentionAfter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("ci_queued_check_attention_after: 2m\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if cfg.CIQueueStallAfter != 2*time.Minute {
+		t.Fatalf("ci_queued_check_attention_after = %v, want 2m", cfg.CIQueueStallAfter)
 	}
 }
 
@@ -460,6 +483,13 @@ func TestDefaultConfigYAML_MatchesGoDefaults(t *testing.T) {
 	}
 	if d != DefaultStepQuietWarning {
 		t.Errorf("YAML step_quiet_warning = %v, Go default = %v", d, DefaultStepQuietWarning)
+	}
+	d, err = time.ParseDuration(raw.CIQueueStallAfter)
+	if err != nil {
+		t.Fatalf("YAML ci_queued_check_attention_after %q is not a valid duration: %v", raw.CIQueueStallAfter, err)
+	}
+	if d != DefaultCIQueuedCheckAttentionAfter {
+		t.Errorf("YAML ci_queued_check_attention_after = %v, Go default = %v", d, DefaultCIQueuedCheckAttentionAfter)
 	}
 	d, err = time.ParseDuration(raw.ReviewNoProgressTimeout)
 	if err != nil {

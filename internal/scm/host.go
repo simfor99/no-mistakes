@@ -137,11 +137,24 @@ const (
 	CheckBucketSkip    CheckBucket = "skipping"
 )
 
+// CheckProgress distinguishes a check that has not started from one that is
+// actively running. Providers that cannot make that distinction leave it
+// unknown; callers must then keep treating the check as ordinary pending work.
+type CheckProgress string
+
+const (
+	CheckProgressUnknown CheckProgress = ""
+	CheckProgressQueued  CheckProgress = "queued"
+	CheckProgressRunning CheckProgress = "running"
+)
+
 // Check is a single CI check result on a PR.
 type Check struct {
 	Name        string
 	Bucket      CheckBucket
-	CompletedAt time.Time // zero when unknown; used to detect CI re-runs between polls
+	Progress    CheckProgress // only set when the provider distinguishes queued from running
+	CreatedAt   time.Time     // zero when unknown; queued checks may use this as their wait anchor
+	CompletedAt time.Time     // zero when unknown; used to detect CI re-runs between polls
 }
 
 // Failing reports whether the check is in a failed bucket.
@@ -150,6 +163,13 @@ func (c Check) Failing() bool { return c.Bucket == CheckBucketFail }
 // Pending reports whether the check is still running or queued.
 func (c Check) Pending() bool {
 	return c.Bucket == CheckBucketPending
+}
+
+// Queued reports whether the provider explicitly says this pending check has
+// not started. Unknown pending states deliberately return false so callers do
+// not mistake normal in-progress work for a queue stall.
+func (c Check) Queued() bool {
+	return c.Pending() && c.Progress == CheckProgressQueued
 }
 
 // Capabilities declares which optional Host methods return meaningful data.

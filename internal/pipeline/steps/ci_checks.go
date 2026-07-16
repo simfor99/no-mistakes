@@ -3,6 +3,8 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -46,6 +48,30 @@ func hasPendingChecks(checks []scm.Check) bool {
 		}
 	}
 	return false
+}
+
+// queuedPendingChecks returns the stable names and oldest known creation time
+// only when every pending check is explicitly queued. A provider's generic
+// "pending" state is not enough: it may represent useful work in progress.
+func queuedPendingChecks(checks []scm.Check) (names string, oldest time.Time, allQueued bool) {
+	queued := make([]string, 0)
+	for _, check := range checks {
+		if !check.Pending() {
+			continue
+		}
+		if !check.Queued() {
+			return "", time.Time{}, false
+		}
+		queued = append(queued, check.Name)
+		if !check.CreatedAt.IsZero() && (oldest.IsZero() || check.CreatedAt.Before(oldest)) {
+			oldest = check.CreatedAt
+		}
+	}
+	if len(queued) == 0 {
+		return "", time.Time{}, false
+	}
+	sort.Strings(queued)
+	return strings.Join(queued, ", "), oldest, true
 }
 
 // failingCheckNames returns the names of failing checks.
@@ -192,6 +218,22 @@ func ciMonitoringTimeoutOutcome() *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: "PR was still open when CI monitoring timed out",
+			Action:      types.ActionAskUser,
+		}},
+	}
+	findingsJSON, _ := json.Marshal(findings)
+	return &pipeline.StepOutcome{
+		NeedsApproval: true,
+		Findings:      string(findingsJSON),
+	}
+}
+
+func ciQueuedChecksOutcome(names string, queuedFor time.Duration) *pipeline.StepOutcome {
+	findings := Findings{
+		Summary: "CI checks remained queued without starting",
+		Items: []Finding{{
+			Severity:    "warning",
+			Description: fmt.Sprintf("CI checks stayed queued for %s without starting: %s", queuedFor.Round(time.Second), names),
 			Action:      types.ActionAskUser,
 		}},
 	}
