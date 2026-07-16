@@ -109,7 +109,7 @@ func TestSubscribeHandshakeDeadlineKeepsLiveSubscriptionOpen(t *testing.T) {
 		<-release
 	}()
 
-	handshakeCtx, cancelHandshake := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	handshakeCtx, cancelHandshake := context.WithCancel(context.Background())
 	defer cancelHandshake()
 	events, cancel, err := ipc.SubscribeWithHandshakeContext(handshakeCtx, context.Background(), sock, &ipc.SubscribeParams{RunID: "r1"})
 	if err != nil {
@@ -117,7 +117,7 @@ func TestSubscribeHandshakeDeadlineKeepsLiveSubscriptionOpen(t *testing.T) {
 	}
 	defer cancel()
 
-	<-handshakeCtx.Done()
+	cancelHandshake()
 	select {
 	case _, ok := <-events:
 		if !ok {

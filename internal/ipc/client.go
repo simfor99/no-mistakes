@@ -207,13 +207,29 @@ func SubscribeWithHandshakeContext(handshakeCtx, streamCtx context.Context, sock
 		}
 	}()
 	handshakeDone := make(chan struct{})
-	var handshakeOnce sync.Once
-	finishHandshake := func() { handshakeOnce.Do(func() { close(handshakeDone) }) }
-	defer finishHandshake()
+	handshakeStopped := make(chan struct{})
+	var handshakeMu sync.Mutex
+	handshakeActive := true
+	finishHandshake := func() bool {
+		handshakeMu.Lock()
+		defer handshakeMu.Unlock()
+		if !handshakeActive {
+			return false
+		}
+		handshakeActive = false
+		close(handshakeDone)
+		return true
+	}
 	go func() {
+		defer close(handshakeStopped)
 		select {
 		case <-handshakeCtx.Done():
-			closeConn()
+			handshakeMu.Lock()
+			if handshakeActive {
+				handshakeActive = false
+				closeConn()
+			}
+			handshakeMu.Unlock()
 		case <-handshakeDone:
 		case <-stopContext:
 		}
@@ -262,7 +278,11 @@ func SubscribeWithHandshakeContext(handshakeCtx, streamCtx context.Context, sock
 		closeConn()
 		return nil, nil, resp.Error
 	}
-	finishHandshake()
+	if !finishHandshake() {
+		closeConn()
+		return nil, nil, handshakeCtx.Err()
+	}
+	<-handshakeStopped
 
 	// Stream events.
 	ch := make(chan Event, 64)
