@@ -171,9 +171,8 @@ When an agent makes an additional fix after a gate round has already produced fi
 Never abort-and-restart, reset the branch, or open a new branch in a way that drops prior gate-fix commits, including the pipeline's own `no-mistakes(review|document|lint): ...` commits.
 A fresh run re-validates the branch's current state, so already-resolved findings do not re-surface.
 
-The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, or relay `ask-user` findings, and how to interpret `axi status` fields like `awaiting_agent` and `active_steps` - is owned by the skill itself and by the live `axi` output.
-Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help` and `no-mistakes axi respond --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
-The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
+The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, or relay `ask-user` findings, how to interpret `axi status` fields like `awaiting_agent` and `active_steps`, and how to use `axi watch` or the opt-in Codex supervisor - is owned by the installed skill and the live `axi` output. The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-axi-watch) documents those commands for humans.
+Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help`, `no-mistakes axi respond --help`, and `no-mistakes axi watch --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
 
 ## Binary resolution
 
