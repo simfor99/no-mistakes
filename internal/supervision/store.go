@@ -1,5 +1,6 @@
 // Package supervision persists the smallest possible amount of local state
-// needed to reconnect an explicitly armed No-Mistakes run to a Codex Stop hook.
+// needed to reconnect an explicitly armed No-Mistakes run to a Codex or Claude
+// Code Stop hook.
 package supervision
 
 import (
@@ -100,7 +101,8 @@ func (s *Store) Arm(reg Registration) (Registration, error) {
 }
 
 // Claim binds one armed registration for cwd to a session id. Returning false
-// is an ordinary no-op: hooks run for every Codex turn, not just supervision.
+// is an ordinary no-op: hooks run for every Codex or Claude Code turn, not just
+// supervision.
 func (s *Store) Claim(cwd, sessionID string) (Registration, bool, error) {
 	if strings.TrimSpace(cwd) == "" || strings.TrimSpace(sessionID) == "" {
 		return Registration{}, false, nil
@@ -150,7 +152,8 @@ func (s *Store) Get(runID string) (Registration, bool, error) {
 	return reg, true, nil
 }
 
-// FindByCWD returns the one registration owned by a Codex session in cwd.
+// FindByCWD returns the one registration owned by a Codex or Claude Code
+// session in cwd.
 // Armed registrations are intentionally included: a Stop hook is what binds an
 // otherwise session-less arm request to the session that actually ended.
 func (s *Store) FindByCWD(cwd string) (Registration, bool, error) {
@@ -168,7 +171,7 @@ func (s *Store) FindByCWD(cwd string) (Registration, bool, error) {
 
 // UpdateForSession atomically persists a small supervisor state transition for
 // the registered session. It deliberately does not create a new claim: hooks
-// for unrelated Codex sessions must remain harmless no-ops.
+// for unrelated Codex or Claude Code sessions must remain harmless no-ops.
 func (s *Store) UpdateForSession(runID, sessionID string, update func(*Registration)) (Registration, bool, error) {
 	if strings.TrimSpace(runID) == "" || strings.TrimSpace(sessionID) == "" {
 		return Registration{}, false, nil
