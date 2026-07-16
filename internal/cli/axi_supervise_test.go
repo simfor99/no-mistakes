@@ -124,17 +124,31 @@ func TestClaudeHookIgnoresMalformedAndNonStopPayloads(t *testing.T) {
 	}
 }
 
-func TestClaudeHookHandoffIDIsOpaqueAndChangesPerAssistantTurn(t *testing.T) {
-	first := claudeHookHandoffID("session-1", "first completed response")
-	second := claudeHookHandoffID("session-1", "second completed response")
-	if first == "" || second == "" || first == second {
-		t.Fatalf("claude hook IDs = %q, %q; want distinct non-empty opaque IDs", first, second)
+func TestClaudeHookHandoffIDDistinguishesTranscriptTurnsAndSuppressesDuplicates(t *testing.T) {
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(transcript, []byte("first turn\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(first, "session-1") || strings.Contains(first, "first completed response") {
+	first := claudeHookHandoffID("session-1", transcript, "Done.")
+	duplicate := claudeHookHandoffID("session-1", transcript, "Done.")
+	if first == "" || first != duplicate {
+		t.Fatalf("same Claude Stop IDs = %q, %q; want identical non-empty opaque IDs", first, duplicate)
+	}
+	if err := os.WriteFile(transcript, []byte("first turn\nsecond turn\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := claudeHookHandoffID("session-1", transcript, "Done.")
+	if second == "" || first == second {
+		t.Fatalf("successive same-message Claude Stop IDs = %q, %q; want distinct IDs", first, second)
+	}
+	if strings.Contains(first, "session-1") || strings.Contains(first, "Done.") {
 		t.Fatalf("claude hook ID leaks hook payload: %q", first)
 	}
-	if got := claudeHookHandoffID("session-1", ""); got != "" {
+	if got := claudeHookHandoffID("session-1", transcript, ""); got != "" {
 		t.Fatalf("empty assistant message ID = %q, want empty", got)
+	}
+	if got := claudeHookHandoffID("session-1", filepath.Join(t.TempDir(), "missing.jsonl"), "Done."); got != "" {
+		t.Fatalf("missing transcript ID = %q, want empty", got)
 	}
 }
 

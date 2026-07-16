@@ -40,11 +40,12 @@ type codexHookEvent struct {
 }
 
 // claudeHookEvent is the stable subset of the official Claude Code Stop-hook
-// payload. Claude does not expose a turn id, so a bounded opaque digest of the
-// completed assistant message is used only for local duplicate suppression.
-// Neither message nor digest is ever returned through the hook channel.
+// payload. Claude does not expose a turn id, so a bounded opaque local
+// identifier is used only for duplicate suppression. Neither message nor
+// identifier is ever returned through the hook channel.
 type claudeHookEvent struct {
 	SessionID            string `json:"session_id"`
+	TranscriptPath       string `json:"transcript_path"`
 	CWD                  string `json:"cwd"`
 	HookEventName        string `json:"hook_event_name"`
 	StopHookActive       bool   `json:"stop_hook_active"`
@@ -216,8 +217,8 @@ func runAxiCodexHook(in io.Reader, out io.Writer) error {
 }
 
 // runAxiClaudeHook is intentionally quiet unless it emits the documented Stop
-// continuation object. Claude's message digest is local-only duplicate
-// suppression; no transcript or message content is read or retained.
+// continuation object. Claude's local-only duplicate suppression identifier
+// does not retain transcript or message content.
 func runAxiClaudeHook(in io.Reader, out io.Writer) error {
 	var event claudeHookEvent
 	if err := json.NewDecoder(io.LimitReader(in, 64<<10)).Decode(&event); err != nil {
@@ -226,18 +227,22 @@ func runAxiClaudeHook(in io.Reader, out io.Writer) error {
 	if event.HookEventName != "Stop" || strings.TrimSpace(event.SessionID) == "" {
 		return nil
 	}
-	handoffID := claudeHookHandoffID(event.SessionID, event.LastAssistantMessage)
+	handoffID := claudeHookHandoffID(event.SessionID, event.TranscriptPath, event.LastAssistantMessage)
 	if handoffID == "" {
 		return nil
 	}
 	return runAxiSupervisorHook(supervisorHookEvent{SessionID: event.SessionID, HandoffID: handoffID, CWD: event.CWD}, out)
 }
 
-func claudeHookHandoffID(sessionID, lastAssistantMessage string) string {
-	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(lastAssistantMessage) == "" {
+func claudeHookHandoffID(sessionID, transcriptPath, lastAssistantMessage string) string {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(transcriptPath) == "" || strings.TrimSpace(lastAssistantMessage) == "" {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(sessionID + "\x00" + lastAssistantMessage))
+	info, err := os.Stat(transcriptPath)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + lastAssistantMessage + fmt.Sprintf("\x00%d\x00%d", info.Size(), info.ModTime().UnixNano())))
 	return "claude:" + hex.EncodeToString(sum[:])
 }
 
