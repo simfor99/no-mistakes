@@ -107,6 +107,7 @@ func TestTestStep_FixMode_UsesFallbackSummaryWhenStructuredSummaryMalformed(t *t
 func TestTestStep_FixMode_AgentWritesNewTests_NeedsApproval(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
 	callCount := 0
 	ag := &mockAgent{

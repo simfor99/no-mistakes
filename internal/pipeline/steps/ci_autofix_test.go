@@ -408,9 +408,13 @@ func TestCIStep_CIAutoFixRetriesAfterChecksRerun(t *testing.T) {
 	sctx.Log = func(s string) { logs = append(logs, s) }
 
 	pollCount := 0
+	clock := time.Now()
 	step := &CIStep{
+		now:           func() time.Time { return clock },
+		baseBranchTip: func(context.Context) (string, bool) { return "", false },
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			pollCount++
+			clock = clock.Add(time.Second)
 			return nil
 		},
 	}
@@ -682,9 +686,13 @@ func TestCIStep_CIAutoFixRetriesWhenSomeChecksStayFailing(t *testing.T) {
 	sctx.Log = func(s string) { logs = append(logs, s) }
 
 	pollCount := 0
+	clock := time.Now()
 	step := &CIStep{
+		now:           func() time.Time { return clock },
+		baseBranchTip: func(context.Context) (string, bool) { return "", false },
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
 			pollCount++
+			clock = clock.Add(time.Second)
 			return nil
 		},
 	}
@@ -855,8 +863,12 @@ func TestCIStep_RetriesMergeConflictAfterRerun(t *testing.T) {
 	var logs []string
 	sctx.Log = func(s string) { logs = append(logs, s) }
 
+	clock := time.Now()
 	step := &CIStep{
+		now:           func() time.Time { return clock },
+		baseBranchTip: func(context.Context) (string, bool) { return "", false },
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
+			clock = clock.Add(time.Second)
 			return nil
 		},
 	}

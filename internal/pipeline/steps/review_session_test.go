@@ -146,6 +146,7 @@ func TestReviewLoop_OneReviewerSessionOneFixerSession(t *testing.T) {
 	}
 
 	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	gitCmd(t, workDir, "checkout", "--detach", run.HeadSHA)
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -248,6 +249,7 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 	}
 
 	exec, database, run, repo, workDir := reviewSessionHarness(t, mock, []pipeline.Step{&ReviewStep{}})
+	gitCmd(t, workDir, "checkout", "--detach", run.HeadSHA)
 	done := make(chan error, 1)
 	go func() {
 		done <- exec.Execute(context.Background(), run, repo, workDir)
