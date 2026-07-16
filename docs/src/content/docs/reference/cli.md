@@ -284,7 +284,12 @@ In a Codex- or Claude-supervised flow, keep `axi watch` as a foreground tool cal
 The optional native-agent supervisor fills that closed-turn gap. It is intentionally two-part: arm the known run, then install and trust one local Codex or Claude Code Stop hook yourself. No-Mistakes never edits `~/.codex/hooks.json` or `~/.claude/settings.json` automatically. Use one agent session per supervised worktree chain.
 
 ```sh
+# Codex
 no-mistakes axi supervise arm --run <id>
+
+# Claude Code
+no-mistakes axi supervise arm --run <id> --claude-transcript <path>
+
 no-mistakes axi supervise status --run <id>
 ```
 
@@ -310,7 +315,7 @@ Stop hooks:
 }
 ```
 
-On a matching Codex or Claude Code turn end, the hook claims only the armed run in the same worktree, repository, and branch, then binds it to that agent session. Codex continuations use the native turn ID. Claude Code does not provide one, so the adapter derives a local-only opaque digest from the completed assistant message solely to suppress repeated delivery; it stores and returns neither message nor digest. The hook waits for an AXI event or a fixed five-minute heartbeat. Its stdout is either empty or one Stop-hook JSON object with `decision: "block"` and one fixed `nm_event=` reason: `technical_gate`, `checks_passed`, `terminal`, `watch_fault`, `heartbeat`, or `stale`. It never starts a second agent process and never exposes findings, logs, run IDs, session data, or Claude message content in the hook response. A terminal run completes the registration. A technical gate continues the session so the agent can inspect the bound AXI status; an `ask-user` gate is marked `awaiting_user` and lets the agent end for Simon's decision. Checks already passed move to `awaiting_merge_result`, while a watcher fault or too many unchanged heartbeats pauses the registration rather than retrying forever. Malformed or non-matching hook events produce no continuation.
+For Claude Code, pass the active transcript path to `arm` with `--claude-transcript`; this snapshots the transcript boundary at arming so the first Stop hook can wait only for its own later assistant entry. On a matching Codex or Claude Code turn end, the hook claims only the armed run in the same worktree, repository, and branch, then binds it to that agent session. Codex continuations use the native turn ID. Claude Code does not provide one, so the adapter derives a local-only opaque digest from the completed assistant message solely to suppress repeated delivery; it stores and returns neither message nor digest. The hook waits for an AXI event or a fixed five-minute heartbeat. Its stdout is either empty or one Stop-hook JSON object with `decision: "block"` and one fixed `nm_event=` reason: `technical_gate`, `checks_passed`, `terminal`, `watch_fault`, `heartbeat`, or `stale`. It never starts a second agent process and never exposes findings, logs, run IDs, session data, or Claude message content in the hook response. A terminal run completes the registration. A technical gate continues the session so the agent can inspect the bound AXI status; an `ask-user` gate is marked `awaiting_user` and lets the agent end for Simon's decision. Checks already passed move to `awaiting_merge_result`, while a watcher fault or too many unchanged heartbeats pauses the registration rather than retrying forever. Malformed or non-matching hook events produce no continuation.
 
 The hook reads the provider's lifecycle event from standard input. It is a local trust boundary: review and trust it before use. Before enabling it, check that the configured Stop-hook timeout is at least 360 seconds (five minutes plus reserve); no-mistakes does not install or change that timeout. Claude Code has an enforced eight-consecutive-continuation cap; the bounded stale-heartbeat budget must remain below it. Set `supervision_max_stale_heartbeats` to an integer from `1` through `6` to choose how many unchanged five-minute heartbeats are shown before the next heartbeat pauses supervision; the default and invalid-value fallback are `4`.
 `axi supervise status --run <id>` reports the local phase, stale-heartbeat count, and any bounded error without exposing the saved agent session ID.

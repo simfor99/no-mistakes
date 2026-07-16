@@ -34,6 +34,8 @@ type Registration struct {
 	Fingerprint            string `json:"fingerprint,omitempty"`
 	LastHandoffTurnID      string `json:"last_handoff_turn_id,omitempty"`
 	LastHandoffFingerprint string `json:"last_handoff_fingerprint,omitempty"`
+	ClaudeTranscriptOffset int64  `json:"claude_transcript_offset,omitempty"`
+	ClaudeTranscriptBound  bool   `json:"claude_transcript_bound,omitempty"`
 	NextHeartbeatAt        int64  `json:"next_heartbeat_at,omitempty"`
 	StaleHeartbeats        int    `json:"stale_heartbeats,omitempty"`
 	Error                  string `json:"error,omitempty"`
@@ -216,7 +218,7 @@ func (s *Store) ResumeAfterUser(runID string) (Registration, bool, error) {
 // PrepareHandoff records the exact Stop-turn/event pair before the hook emits
 // its JSON continuation. This is the idempotency boundary for repeated Stop
 // deliveries; stop_hook_active itself is intentionally not used as a veto.
-func (s *Store) PrepareHandoff(runID, sessionID, turnID, eventFingerprint, progressFingerprint string, phase Phase, nextHeartbeatAt int64, staleHeartbeats int) (Registration, bool, error) {
+func (s *Store) PrepareHandoff(runID, sessionID, turnID, eventFingerprint, progressFingerprint string, phase Phase, nextHeartbeatAt int64, staleHeartbeats int, claudeTranscriptOffset int64) (Registration, bool, error) {
 	if strings.TrimSpace(turnID) == "" || strings.TrimSpace(eventFingerprint) == "" {
 		return Registration{}, false, nil
 	}
@@ -241,6 +243,9 @@ func (s *Store) PrepareHandoff(runID, sessionID, turnID, eventFingerprint, progr
 	reg.Phase = phase
 	reg.LastHandoffTurnID = turnID
 	reg.LastHandoffFingerprint = eventFingerprint
+	if reg.ClaudeTranscriptBound && claudeTranscriptOffset >= reg.ClaudeTranscriptOffset {
+		reg.ClaudeTranscriptOffset = claudeTranscriptOffset
+	}
 	reg.Fingerprint = progressFingerprint
 	reg.NextHeartbeatAt = nextHeartbeatAt
 	reg.StaleHeartbeats = staleHeartbeats

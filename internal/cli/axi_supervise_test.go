@@ -130,46 +130,105 @@ func TestClaudeTranscriptHandoffIDDistinguishesTurnsAndSuppressesDuplicates(t *t
 	t.Cleanup(func() { claudeTranscriptWait = previousWait })
 
 	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(transcript, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	boundary, err := claudeTranscriptBoundaryOffset(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(transcript, []byte(`{"type":"assistant","uuid":"assistant-1","message":{"content":"Done."}}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	first := claudeTranscriptHandoffID("session-1", transcript, "Done.", "")
-	duplicate := claudeTranscriptHandoffID("session-1", transcript, "Done.", first)
+	first, nextOffset := claudeTranscriptHandoffID("session-1", transcript, "Done.", boundary, "")
+	duplicate, _ := claudeTranscriptHandoffID("session-1", transcript, "Done.", nextOffset, first)
 	if first == "" || first != duplicate {
 		t.Fatalf("same Claude Stop IDs = %q, %q; want identical non-empty opaque IDs", first, duplicate)
 	}
-	if err := os.WriteFile(transcript, []byte(`{"type":"assistant","uuid":"assistant-1","message":{"content":"Done."}}`+"\n"+`{"type":"assistant","uuid":"assistant-2","message":{"content":"Done."}}`+"\n"), 0o600); err != nil {
+	file, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
-	second := claudeTranscriptHandoffID("session-1", transcript, "Done.", first)
+	if _, err := file.WriteString(`{"type":"assistant","uuid":"assistant-2","message":{"content":"Done."}}` + "\n"); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, _ := claudeTranscriptHandoffID("session-1", transcript, "Done.", nextOffset, first)
 	if second == "" || first == second {
 		t.Fatalf("successive same-message Claude Stop IDs = %q, %q; want distinct IDs", first, second)
 	}
 	if strings.Contains(first, "session-1") || strings.Contains(first, "assistant-1") {
 		t.Fatalf("claude hook ID leaks hook payload: %q", first)
 	}
-	if got := claudeTranscriptHandoffID("session-1", filepath.Join(t.TempDir(), "missing.jsonl"), "Done.", first); got != "" {
+	if got, _ := claudeTranscriptHandoffID("session-1", filepath.Join(t.TempDir(), "missing.jsonl"), "Done.", 0, ""); got != "" {
 		t.Fatalf("missing transcript ID = %q, want empty", got)
 	}
 }
 
-func TestClaudeTranscriptHandoffIDRejectsStaleAssistantMessage(t *testing.T) {
+func TestClaudeTranscriptHandoffIDIgnoresPreArmIdenticalAssistantMessage(t *testing.T) {
 	previousWait := claudeTranscriptWait
 	claudeTranscriptWait = 0
 	t.Cleanup(func() { claudeTranscriptWait = previousWait })
 
 	transcript := filepath.Join(t.TempDir(), "session.jsonl")
-	if err := os.WriteFile(transcript, []byte(`{"type":"assistant","uuid":"stale","message":{"content":[{"type":"text","text":"Earlier."}]}}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(transcript, []byte(`{"type":"assistant","uuid":"stale","message":{"content":[{"type":"text","text":"Done."}]}}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := claudeTranscriptHandoffID("session-1", transcript, "Current.", ""); got != "" {
-		t.Fatalf("stale transcript handoff = %q, want empty", got)
-	}
-	if err := os.WriteFile(transcript, []byte(`{"type":"assistant","uuid":"stale","message":{"content":[{"type":"text","text":"Earlier."}]}}`+"\n"+`{"type":"assistant","uuid":"current","message":{"content":[{"type":"text","text":"Current."}]}}`+"\n"), 0o600); err != nil {
+	boundary, err := claudeTranscriptBoundaryOffset(transcript)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := claudeTranscriptHandoffID("session-1", transcript, "Current.", ""); got == "" {
-		t.Fatal("current transcript handoff = empty, want matching assistant ID")
+	if got, _ := claudeTranscriptHandoffID("session-1", transcript, "Done.", boundary, ""); got != "" {
+		t.Fatalf("pre-arm transcript handoff = %q, want empty", got)
+	}
+	file, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(`{"type":"assistant","uuid":"current","message":{"content":[{"type":"text","text":"Done."}]}}` + "\n"); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := claudeTranscriptHandoffID("session-1", transcript, "Done.", boundary, ""); got == "" {
+		t.Fatal("post-arm transcript handoff = empty, want matching assistant ID")
+	}
+}
+
+func TestClaudeTranscriptHandoffIDWaitsForPostArmTranscriptFlush(t *testing.T) {
+	previousWait := claudeTranscriptWait
+	previousPoll := claudeTranscriptPollInterval
+	claudeTranscriptWait = 300 * time.Millisecond
+	claudeTranscriptPollInterval = 5 * time.Millisecond
+	t.Cleanup(func() {
+		claudeTranscriptWait = previousWait
+		claudeTranscriptPollInterval = previousPoll
+	})
+
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(transcript, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	boundary, err := claudeTranscriptBoundaryOffset(transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		file, err := os.OpenFile(transcript, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		_, _ = file.WriteString(`{"type":"assistant","uuid":"current","message":{"content":"Done."}}` + "\n")
+		_ = file.Close()
+	}()
+	if got, _ := claudeTranscriptHandoffID("session-1", transcript, "Done.", boundary, ""); got == "" {
+		t.Fatal("delayed transcript handoff = empty, want matching assistant ID")
 	}
 }
 

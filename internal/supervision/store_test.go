@@ -118,31 +118,31 @@ func TestStoreRecoversFromStaleClaimLockFile(t *testing.T) {
 
 func TestStorePrepareHandoffDeduplicatesTurn(t *testing.T) {
 	store := NewStore(t.TempDir())
-	if _, err := store.Arm(Registration{RunID: "run-1", RepoID: "repo-1", CWD: "/work"}); err != nil {
+	if _, err := store.Arm(Registration{RunID: "run-1", RepoID: "repo-1", CWD: "/work", ClaudeTranscriptBound: true, ClaudeTranscriptOffset: 7}); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, err := store.Claim("/work", "session-1"); err != nil || !ok {
 		t.Fatalf("Claim() = (_, %v, %v)", ok, err)
 	}
-	first, emitted, err := store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-1", "progress-1", PhaseHandoffInProgress, 123, 1)
+	first, emitted, err := store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-1", "progress-1", PhaseHandoffInProgress, 123, 1, 11)
 	if err != nil || !emitted {
 		t.Fatalf("first PrepareHandoff() = (%+v, %v, %v)", first, emitted, err)
 	}
-	if first.LastHandoffTurnID != "turn-1" || first.LastHandoffFingerprint != "heartbeat-1" {
+	if first.LastHandoffTurnID != "turn-1" || first.LastHandoffFingerprint != "heartbeat-1" || first.ClaudeTranscriptOffset != 11 {
 		t.Fatalf("first handoff fields = %+v", first)
 	}
-	second, emitted, err := store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-2", "progress-2", PhaseHandoffInProgress, 124, 2)
+	second, emitted, err := store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-2", "progress-2", PhaseHandoffInProgress, 124, 2, 0)
 	if err != nil || !emitted {
 		t.Fatalf("different event PrepareHandoff() = (%+v, %v, %v), want emitted handoff", second, emitted, err)
 	}
 	if second.LastHandoffFingerprint != "heartbeat-2" {
 		t.Fatalf("different event fingerprint = %q, want heartbeat-2", second.LastHandoffFingerprint)
 	}
-	_, emitted, err = store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-2", "progress-2", PhaseHandoffInProgress, 124, 2)
+	_, emitted, err = store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-2", "progress-2", PhaseHandoffInProgress, 124, 2, 0)
 	if err != nil || emitted {
 		t.Fatalf("duplicate event PrepareHandoff() emitted=%v err=%v, want false nil", emitted, err)
 	}
-	_, emitted, err = store.PrepareHandoff("run-1", "session-1", "turn-2", "heartbeat-1", "progress-1", PhaseHandoffInProgress, 124, 2)
+	_, emitted, err = store.PrepareHandoff("run-1", "session-1", "turn-2", "heartbeat-1", "progress-1", PhaseHandoffInProgress, 124, 2, 0)
 	if err != nil || !emitted {
 		t.Fatalf("new-turn PrepareHandoff() emitted=%v err=%v, want true nil", emitted, err)
 	}

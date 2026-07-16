@@ -108,7 +108,8 @@ Run the pipeline and decide on its findings as they come up:
    itself never responds, edits, or starts the daemon.
    If the active Codex or Claude Code session must survive a completed turn,
    use the documented opt-in supervisor instead: after the run ID is known, run
-   `no-mistakes axi supervise arm --run <id>` and only when the matching
+   `no-mistakes axi supervise arm --run <id>` (for Claude Code, include
+   `--claude-transcript <path>` for the active transcript) and only when the matching
    reviewed `Stop` hook is installed. Use `no-mistakes axi codex-hook` for
    Codex and `no-mistakes axi claude-hook` for Claude Code. The hook may
    keep this same session alive for a technical AXI event or a five-minute

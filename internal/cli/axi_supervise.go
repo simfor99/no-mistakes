@@ -65,6 +65,7 @@ type supervisorHookEvent struct {
 	CWD              string
 	TranscriptPath   string
 	AssistantMessage string
+	TranscriptOffset int64
 }
 
 type supervisorOutcome string
@@ -99,10 +100,12 @@ func newAxiSuperviseStatusCmd() *cobra.Command {
 
 func newAxiSuperviseArmCmd() *cobra.Command {
 	var runID string
-	cmd := &cobra.Command{Use: "arm", Short: "Arm one active run for an installed Codex Stop hook", Args: cobra.NoArgs, SilenceErrors: true, SilenceUsage: true}
+	var claudeTranscript string
+	cmd := &cobra.Command{Use: "arm", Short: "Arm one active run for an installed Stop hook", Args: cobra.NoArgs, SilenceErrors: true, SilenceUsage: true}
 	cmd.Flags().StringVar(&runID, "run", "", "run id to supervise (required)")
+	cmd.Flags().StringVar(&claudeTranscript, "claude-transcript", "", "active Claude Code transcript path")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
-		return runAxiSuperviseArm(cmd, strings.TrimSpace(runID))
+		return runAxiSuperviseArm(cmd, strings.TrimSpace(runID), strings.TrimSpace(claudeTranscript))
 	}
 	return cmd
 }
@@ -133,7 +136,7 @@ func newAxiClaudeHookCmd() *cobra.Command {
 	}
 }
 
-func runAxiSuperviseArm(cmd *cobra.Command, runID string) error {
+func runAxiSuperviseArm(cmd *cobra.Command, runID, claudeTranscript string) error {
 	if runID == "" {
 		return emitError(cmd, 2, "--run is required", "Run `no-mistakes axi supervise arm --run <id>` after the AXI run id is known")
 	}
@@ -164,7 +167,16 @@ func runAxiSuperviseArm(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		return emitError(cmd, 1, err.Error())
 	}
-	reg, err := supervision.NewStore(env.p.SupervisionDir()).Arm(supervision.Registration{RunID: runID, RepoID: env.repo.ID, CWD: cwd, Branch: branch})
+	registration := supervision.Registration{RunID: runID, RepoID: env.repo.ID, CWD: cwd, Branch: branch}
+	if claudeTranscript != "" {
+		offset, err := claudeTranscriptBoundaryOffset(claudeTranscript)
+		if err != nil {
+			return emitError(cmd, 1, err.Error())
+		}
+		registration.ClaudeTranscriptOffset = offset
+		registration.ClaudeTranscriptBound = true
+	}
+	reg, err := supervision.NewStore(env.p.SupervisionDir()).Arm(registration)
 	if err != nil {
 		return emitError(cmd, 1, err.Error())
 	}
@@ -174,7 +186,7 @@ func runAxiSuperviseArm(cmd *cobra.Command, runID string) error {
 		toonField("cwd", reg.CWD),
 		toonField("hook_required", true),
 		toonField("single_session_per_worktree_required", true),
-		toonField("help", []string{"Install the documented Codex Stop hook before ending this turn; it keeps this same turn alive for technical events and pauses for your decisions."}),
+		toonField("help", []string{"Install the documented Stop hook before ending this turn; for Claude Code, arm with --claude-transcript so only assistant entries written after arming are eligible."}),
 	)
 	return nil
 }
@@ -248,55 +260,76 @@ func claudeHookHandoffID(sessionID, assistantID string) string {
 	return "claude:" + hex.EncodeToString(sum[:])
 }
 
-func claudeTranscriptHandoffID(sessionID, transcriptPath, assistantMessage, previous string) string {
+func claudeTranscriptHandoffID(sessionID, transcriptPath, assistantMessage string, offset int64, previous string) (string, int64) {
 	deadline := time.Now().Add(claudeTranscriptWait)
 	for {
-		handoffID := claudeHookHandoffID(sessionID, claudeTranscriptAssistantID(transcriptPath, assistantMessage))
-		if handoffID == "" || handoffID != previous || !time.Now().Before(deadline) {
-			return handoffID
+		assistantID, nextOffset := claudeTranscriptAssistantAfter(transcriptPath, assistantMessage, offset)
+		handoffID := claudeHookHandoffID(sessionID, assistantID)
+		if handoffID != "" && handoffID != previous {
+			return handoffID, nextOffset
+		}
+		if !time.Now().Before(deadline) {
+			if handoffID == "" && previous != "" {
+				return previous, offset
+			}
+			return handoffID, nextOffset
 		}
 		time.Sleep(claudeTranscriptPollInterval)
 	}
 }
 
-func claudeTranscriptAssistantID(path, assistantMessage string) string {
+func claudeTranscriptBoundaryOffset(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("inspect Claude transcript: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("Claude transcript is not a regular file")
+	}
+	return info.Size(), nil
+}
+
+func claudeTranscriptAssistantAfter(path, assistantMessage string, offset int64) (string, int64) {
 	file, err := os.Open(path)
 	if err != nil {
-		return ""
+		return "", offset
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		return ""
+		return "", offset
 	}
-	const maxTailBytes = 64 << 10
-	if info.Size() > maxTailBytes {
-		if _, err := file.Seek(-maxTailBytes, io.SeekEnd); err != nil {
-			return ""
-		}
+	if offset < 0 || offset > info.Size() {
+		return "", offset
 	}
-	reader := bufio.NewReader(file)
-	if info.Size() > maxTailBytes {
-		if _, err := reader.ReadString('\n'); err != nil && err != io.EOF {
-			return ""
-		}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return "", offset
 	}
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	reader := bufio.NewReader(io.LimitReader(file, 1<<20))
 	assistantID := ""
-	for scanner.Scan() {
-		var record struct {
-			Type    string `json:"type"`
-			UUID    string `json:"uuid"`
-			Message struct {
-				Content json.RawMessage `json:"content"`
-			} `json:"message"`
+	assistantOffset := offset
+	position := offset
+	for {
+		line, err := reader.ReadBytes('\n')
+		position += int64(len(line))
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
+			var record struct {
+				Type    string `json:"type"`
+				UUID    string `json:"uuid"`
+				Message struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"message"`
+			}
+			if json.Unmarshal(line, &record) == nil && record.Type == "assistant" && strings.TrimSpace(record.UUID) != "" && claudeTranscriptMessageMatches(record.Message.Content, assistantMessage) {
+				assistantID = record.UUID
+				assistantOffset = position
+			}
 		}
-		if json.Unmarshal(scanner.Bytes(), &record) == nil && record.Type == "assistant" && strings.TrimSpace(record.UUID) != "" && claudeTranscriptMessageMatches(record.Message.Content, assistantMessage) {
-			assistantID = record.UUID
+		if err != nil {
+			return assistantID, assistantOffset
 		}
 	}
-	return assistantID
 }
 
 func claudeTranscriptMessageMatches(content json.RawMessage, expected string) bool {
@@ -347,7 +380,10 @@ func runAxiSupervisorHook(event supervisorHookEvent, out io.Writer) error {
 		return nil
 	}
 	if event.TranscriptPath != "" {
-		event.HandoffID = claudeTranscriptHandoffID(event.SessionID, event.TranscriptPath, event.AssistantMessage, reg.LastHandoffTurnID)
+		if !reg.ClaudeTranscriptBound {
+			return nil
+		}
+		event.HandoffID, event.TranscriptOffset = claudeTranscriptHandoffID(event.SessionID, event.TranscriptPath, event.AssistantMessage, reg.ClaudeTranscriptOffset, reg.LastHandoffTurnID)
 	}
 	if strings.TrimSpace(event.HandoffID) == "" || reg.LastHandoffTurnID == event.HandoffID {
 		return nil
@@ -540,7 +576,7 @@ func applySupervisorOutcome(store *supervision.Store, p *paths.Paths, reg superv
 	if reason == "" {
 		return
 	}
-	prepared, emit, err := store.PrepareHandoff(reg.RunID, event.SessionID, event.HandoffID, fingerprint, supervisorProgressFingerprint(run), phase, nextHeartbeat, stale)
+	prepared, emit, err := store.PrepareHandoff(reg.RunID, event.SessionID, event.HandoffID, fingerprint, supervisorProgressFingerprint(run), phase, nextHeartbeat, stale, event.TranscriptOffset)
 	if err != nil || !emit || prepared.SessionID != event.SessionID {
 		return
 	}
