@@ -503,14 +503,12 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
-		ref := normalizedBranchRef(sctx.Run.Branch)
-		if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, headSHA, sctx.Run.HeadSHA); err != nil {
-			return nil, fmt.Errorf("update local branch ref after rebase: %w", err)
-		}
+		previousHead := sctx.Run.HeadSHA
 		sctx.Run.HeadSHA = headSHA
 		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
 			return nil, err
 		}
+		sctx.Shared.SetBranchRefHead(previousHead)
 		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
 	}
 

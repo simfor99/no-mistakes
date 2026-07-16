@@ -165,14 +165,19 @@ func updateRunHeadSHA(sctx *pipeline.StepContext, headSHA string) error {
 	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", recordedHead, headSHA); err != nil {
 		return fmt.Errorf("refusing to record %s head %s: it is not a descendant of the pipeline's recorded head %s", sctx.Run.Branch, headSHA, recordedHead)
 	}
+	refHead := recordedHead
+	if sharedHead := strings.TrimSpace(sctx.Shared.BranchRefHead()); sharedHead != "" {
+		refHead = sharedHead
+	}
 	ref := normalizedBranchRef(sctx.Run.Branch)
-	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "update-ref", ref, headSHA, recordedHead); err != nil {
+	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "update-ref", ref, headSHA, refHead); err != nil {
 		return fmt.Errorf("update local branch ref: %w", err)
 	}
 	sctx.Run.HeadSHA = headSHA
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
 		return err
 	}
+	sctx.Shared.SetBranchRefHead(headSHA)
 	return nil
 }
 
