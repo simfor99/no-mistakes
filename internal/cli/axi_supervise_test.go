@@ -301,6 +301,52 @@ func TestClaudeTranscriptHandoffPersistsVerifiedProgressPastScanLimit(t *testing
 	}
 }
 
+func TestClaudeTranscriptHandoffDoesNotAdvanceOnDelayedDuplicate(t *testing.T) {
+	previousWait := claudeTranscriptWait
+	claudeTranscriptWait = 0
+	t.Cleanup(func() { claudeTranscriptWait = previousWait })
+
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	first := `{"type":"assistant","uuid":"first","message":{"content":"First."}}` + "\n"
+	second := `{"type":"assistant","uuid":"second","message":{"content":"Second."}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(first+second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	offset := int64(len(first))
+	previous := claudeHookHandoffID("session-1", "first")
+	handoff := claudeTranscriptHandoffForCursor("session-1", transcript, "First.", offset, offset, previous)
+	if handoff.handoffID != previous || handoff.scanOffset != offset || handoff.overflow {
+		t.Fatalf("delayed duplicate handoff = %+v, want unchanged cursor fallback", handoff)
+	}
+}
+
+func TestClaudeTranscriptHandoffMarksOversizedRecordUnverifiable(t *testing.T) {
+	previousWait := claudeTranscriptWait
+	previousChunk := claudeTranscriptScanChunk
+	previousLimit := claudeTranscriptScanLimit
+	previousRecordLimit := claudeTranscriptRecordLimit
+	claudeTranscriptWait = 0
+	claudeTranscriptScanChunk = 32
+	claudeTranscriptScanLimit = 256
+	claudeTranscriptRecordLimit = 64
+	t.Cleanup(func() {
+		claudeTranscriptWait = previousWait
+		claudeTranscriptScanChunk = previousChunk
+		claudeTranscriptScanLimit = previousLimit
+		claudeTranscriptRecordLimit = previousRecordLimit
+	})
+
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	record := `{"type":"assistant","uuid":"current","message":{"content":"Done."},"extra":"` + strings.Repeat("x", 200) + `"}` + "\n"
+	if err := os.WriteFile(transcript, []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handoff := claudeTranscriptHandoffForCursor("session-1", transcript, "Done.", 0, 0, "")
+	if handoff.handoffID != "" || !handoff.unverifiable || handoff.scanOffset != 0 {
+		t.Fatalf("oversized record handoff = %+v, want unverifiable paused-state input", handoff)
+	}
+}
+
 func TestClassifySupervisorRunFailsClosedForAskUserAndMalformedGates(t *testing.T) {
 	findings := `{"findings":[{"id":"decision","action":"ask-user"}]}`
 	for _, tc := range []struct {
