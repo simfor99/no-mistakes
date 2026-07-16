@@ -73,6 +73,7 @@ type supervisorHookEvent struct {
 
 type claudeTranscriptCursor struct {
 	offset     int64
+	checkpoint int64
 	discarding bool
 	partial    []byte
 }
@@ -82,6 +83,13 @@ type claudeTranscriptScan struct {
 	assistantOffset int64
 	cursor          claudeTranscriptCursor
 	consumed        int64
+}
+
+type claudeTranscriptHandoff struct {
+	handoffID       string
+	assistantOffset int64
+	scanOffset      int64
+	overflow        bool
 }
 
 type supervisorOutcome string
@@ -190,6 +198,7 @@ func runAxiSuperviseArm(cmd *cobra.Command, runID, claudeTranscript string) erro
 			return emitError(cmd, 1, err.Error())
 		}
 		registration.ClaudeTranscriptOffset = offset
+		registration.ClaudeTranscriptScanOffset = offset
 		registration.ClaudeTranscriptBound = true
 	}
 	reg, err := supervision.NewStore(env.p.SupervisionDir()).Arm(registration)
@@ -277,8 +286,16 @@ func claudeHookHandoffID(sessionID, assistantID string) string {
 }
 
 func claudeTranscriptHandoffID(sessionID, transcriptPath, assistantMessage string, offset int64, previous string) (string, int64) {
+	handoff := claudeTranscriptHandoffForCursor(sessionID, transcriptPath, assistantMessage, offset, offset, previous)
+	return handoff.handoffID, handoff.assistantOffset
+}
+
+func claudeTranscriptHandoffForCursor(sessionID, transcriptPath, assistantMessage string, offset, scanOffset int64, previous string) claudeTranscriptHandoff {
 	deadline := time.Now().Add(claudeTranscriptWait)
-	cursor := claudeTranscriptCursor{offset: offset}
+	if scanOffset < offset {
+		scanOffset = offset
+	}
+	cursor := claudeTranscriptCursor{offset: scanOffset, checkpoint: scanOffset}
 	chunk := claudeTranscriptScanChunk
 	if chunk <= 0 {
 		chunk = 1 << 20
@@ -310,13 +327,14 @@ func claudeTranscriptHandoffID(sessionID, transcriptPath, assistantMessage strin
 		}
 		handoffID := claudeHookHandoffID(sessionID, assistantID)
 		if handoffID != "" && handoffID != previous {
-			return handoffID, assistantOffset
+			return claudeTranscriptHandoff{handoffID: handoffID, assistantOffset: assistantOffset, scanOffset: assistantOffset}
 		}
 		if !time.Now().Before(deadline) || scanned >= limit {
+			handoff := claudeTranscriptHandoff{handoffID: handoffID, assistantOffset: assistantOffset, scanOffset: cursor.checkpoint, overflow: scanned >= limit && cursor.checkpoint < cursor.offset}
 			if handoffID == "" && previous != "" {
-				return previous, offset
+				handoff.handoffID, handoff.assistantOffset = previous, offset
 			}
-			return handoffID, assistantOffset
+			return handoff
 		}
 		if !progressed {
 			time.Sleep(claudeTranscriptPollInterval)
@@ -363,10 +381,10 @@ func claudeTranscriptAssistantAfter(path, assistantMessage string, cursor claude
 		}
 		if result.cursor.discarding {
 			if len(line) > 0 && line[len(line)-1] == '\n' {
-				result.cursor = claudeTranscriptCursor{offset: position}
+				result.cursor = claudeTranscriptCursor{offset: position, checkpoint: position}
 				continue
 			}
-			result.cursor = claudeTranscriptCursor{offset: position, discarding: true}
+			result.cursor = claudeTranscriptCursor{offset: position, checkpoint: result.cursor.checkpoint, discarding: true}
 			return result
 		}
 		if len(line) > 0 && line[len(line)-1] == '\n' {
@@ -374,7 +392,7 @@ func claudeTranscriptAssistantAfter(path, assistantMessage string, cursor claude
 			if len(result.cursor.partial) > 0 {
 				line = append(result.cursor.partial, line...)
 			}
-			result.cursor = claudeTranscriptCursor{offset: position}
+			result.cursor = claudeTranscriptCursor{offset: position, checkpoint: position}
 			var record struct {
 				Type    string `json:"type"`
 				UUID    string `json:"uuid"`
@@ -389,7 +407,7 @@ func claudeTranscriptAssistantAfter(path, assistantMessage string, cursor claude
 			continue
 		}
 		if int64(len(result.cursor.partial)+len(line)) > claudeTranscriptRecordLimit {
-			result.cursor = claudeTranscriptCursor{offset: position, discarding: true}
+			result.cursor = claudeTranscriptCursor{offset: position, checkpoint: result.cursor.checkpoint, discarding: true}
 		} else {
 			result.cursor.offset = position
 			result.cursor.partial = append(result.cursor.partial, line...)
@@ -449,7 +467,23 @@ func runAxiSupervisorHook(event supervisorHookEvent, out io.Writer) error {
 		if !reg.ClaudeTranscriptBound {
 			return nil
 		}
-		event.HandoffID, event.TranscriptOffset = claudeTranscriptHandoffID(event.SessionID, event.TranscriptPath, event.AssistantMessage, reg.ClaudeTranscriptOffset, reg.LastHandoffTurnID)
+		handoff := claudeTranscriptHandoffForCursor(event.SessionID, event.TranscriptPath, event.AssistantMessage, reg.ClaudeTranscriptOffset, reg.ClaudeTranscriptScanOffset, reg.LastHandoffTurnID)
+		event.HandoffID, event.TranscriptOffset = handoff.handoffID, handoff.assistantOffset
+		if handoff.overflow {
+			_, _, _ = store.UpdateForSession(reg.RunID, event.SessionID, func(reg *supervision.Registration) {
+				reg.Phase, reg.Error = supervision.PhasePaused, "claude_transcript_scan_limit"
+				reg.AdvanceClaudeTranscriptScanOffset(handoff.scanOffset)
+			})
+			return nil
+		}
+		if strings.TrimSpace(event.HandoffID) == "" || reg.LastHandoffTurnID == event.HandoffID {
+			if handoff.scanOffset > reg.ClaudeTranscriptScanOffset {
+				_, _, _ = store.UpdateForSession(reg.RunID, event.SessionID, func(reg *supervision.Registration) {
+					reg.AdvanceClaudeTranscriptScanOffset(handoff.scanOffset)
+				})
+			}
+			return nil
+		}
 	}
 	if strings.TrimSpace(event.HandoffID) == "" || reg.LastHandoffTurnID == event.HandoffID {
 		return nil

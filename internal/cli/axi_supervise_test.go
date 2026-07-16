@@ -256,6 +256,51 @@ func TestClaudeTranscriptHandoffIDScansPastLargePrefix(t *testing.T) {
 	}
 }
 
+func TestClaudeTranscriptHandoffPersistsVerifiedProgressPastScanLimit(t *testing.T) {
+	previousWait := claudeTranscriptWait
+	previousChunk := claudeTranscriptScanChunk
+	previousLimit := claudeTranscriptScanLimit
+	claudeTranscriptWait = 0
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	prefix := `{"type":"user","uuid":"prefix","message":{"content":"` + strings.Repeat("x", 200) + `"}}` + "\n"
+	claudeTranscriptScanChunk = int64(len(prefix))
+	claudeTranscriptScanLimit = int64(len(prefix))
+	t.Cleanup(func() {
+		claudeTranscriptWait = previousWait
+		claudeTranscriptScanChunk = previousChunk
+		claudeTranscriptScanLimit = previousLimit
+	})
+
+	assistant := `{"type":"assistant","uuid":"current","message":{"content":"Done."}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(prefix+assistant), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := claudeTranscriptHandoffForCursor("session-1", transcript, "Done.", 0, 0, "")
+	if first.handoffID != "" || first.overflow || first.scanOffset != int64(len(prefix)) {
+		t.Fatalf("first bounded scan = %+v, want verified prefix progress", first)
+	}
+	store := supervision.NewStore(t.TempDir())
+	if _, err := store.Arm(supervision.Registration{RunID: "run", RepoID: "repo", CWD: "/work", ClaudeTranscriptBound: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Claim("/work", "session-1"); err != nil || !ok {
+		t.Fatalf("Claim() = (_, %v, %v)", ok, err)
+	}
+	if _, ok, err := store.UpdateForSession("run", "session-1", func(reg *supervision.Registration) {
+		reg.AdvanceClaudeTranscriptScanOffset(first.scanOffset)
+	}); err != nil || !ok {
+		t.Fatalf("UpdateForSession() = (_, %v, %v)", ok, err)
+	}
+	reg, ok, err := store.Get("run")
+	if err != nil || !ok || reg.ClaudeTranscriptScanOffset != first.scanOffset {
+		t.Fatalf("persisted scan progress = (%+v, %v, %v)", reg, ok, err)
+	}
+	second := claudeTranscriptHandoffForCursor("session-1", transcript, "Done.", 0, reg.ClaudeTranscriptScanOffset, "")
+	if second.handoffID == "" || second.assistantOffset <= first.scanOffset {
+		t.Fatalf("resumed bounded scan = %+v, want assistant handoff after progress", second)
+	}
+}
+
 func TestClassifySupervisorRunFailsClosedForAskUserAndMalformedGates(t *testing.T) {
 	findings := `{"findings":[{"id":"decision","action":"ask-user"}]}`
 	for _, tc := range []struct {

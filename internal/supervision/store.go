@@ -25,26 +25,34 @@ const (
 )
 
 type Registration struct {
-	RunID                  string `json:"run_id"`
-	RepoID                 string `json:"repo_id"`
-	CWD                    string `json:"cwd"`
-	Branch                 string `json:"branch"`
-	SessionID              string `json:"session_id,omitempty"`
-	Phase                  Phase  `json:"phase"`
-	Fingerprint            string `json:"fingerprint,omitempty"`
-	LastHandoffTurnID      string `json:"last_handoff_turn_id,omitempty"`
-	LastHandoffFingerprint string `json:"last_handoff_fingerprint,omitempty"`
-	ClaudeTranscriptOffset int64  `json:"claude_transcript_offset,omitempty"`
-	ClaudeTranscriptBound  bool   `json:"claude_transcript_bound,omitempty"`
-	NextHeartbeatAt        int64  `json:"next_heartbeat_at,omitempty"`
-	StaleHeartbeats        int    `json:"stale_heartbeats,omitempty"`
-	Error                  string `json:"error,omitempty"`
-	UpdatedAt              int64  `json:"updated_at"`
+	RunID                      string `json:"run_id"`
+	RepoID                     string `json:"repo_id"`
+	CWD                        string `json:"cwd"`
+	Branch                     string `json:"branch"`
+	SessionID                  string `json:"session_id,omitempty"`
+	Phase                      Phase  `json:"phase"`
+	Fingerprint                string `json:"fingerprint,omitempty"`
+	LastHandoffTurnID          string `json:"last_handoff_turn_id,omitempty"`
+	LastHandoffFingerprint     string `json:"last_handoff_fingerprint,omitempty"`
+	ClaudeTranscriptOffset     int64  `json:"claude_transcript_offset,omitempty"`
+	ClaudeTranscriptScanOffset int64  `json:"claude_transcript_scan_offset,omitempty"`
+	ClaudeTranscriptBound      bool   `json:"claude_transcript_bound,omitempty"`
+	NextHeartbeatAt            int64  `json:"next_heartbeat_at,omitempty"`
+	StaleHeartbeats            int    `json:"stale_heartbeats,omitempty"`
+	Error                      string `json:"error,omitempty"`
+	UpdatedAt                  int64  `json:"updated_at"`
 }
 
 func (r *Registration) AdvanceClaudeTranscriptOffset(offset int64) {
 	if r.ClaudeTranscriptBound && offset >= r.ClaudeTranscriptOffset {
 		r.ClaudeTranscriptOffset = offset
+		r.ClaudeTranscriptScanOffset = offset
+	}
+}
+
+func (r *Registration) AdvanceClaudeTranscriptScanOffset(offset int64) {
+	if r.ClaudeTranscriptBound && offset >= r.ClaudeTranscriptOffset && offset >= r.ClaudeTranscriptScanOffset {
+		r.ClaudeTranscriptScanOffset = offset
 	}
 }
 
