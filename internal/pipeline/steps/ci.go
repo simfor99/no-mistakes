@@ -86,16 +86,25 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	}
 	switch state {
 	case scm.PRStateMerged:
+		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
+			return false, err
+		}
 		if sctx.Log != nil {
 			sctx.Log("PR has been merged; clearing stale CI approval gate")
 		}
 		return true, nil
 	case scm.PRStateClosed:
+		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
+			return false, err
+		}
 		if sctx.Log != nil {
 			sctx.Log("PR has been closed; clearing stale CI approval gate")
 		}
 		return true, nil
 	case scm.PRStateOpen:
+		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+			return false, err
+		}
 		return false, nil
 	default:
 		return false, fmt.Errorf("PR state is unresolved: %q", state)
@@ -246,11 +255,21 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			sctx.Log(fmt.Sprintf("warning: could not check PR state: %v", err))
 			prStateKnown = false
 		} else if state == scm.PRStateMerged {
+			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
+				return nil, err
+			}
 			sctx.Log("PR has been merged!")
 			return &pipeline.StepOutcome{}, nil
 		} else if state == scm.PRStateClosed {
+			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
+				return nil, err
+			}
 			sctx.Log("PR has been closed")
 			return &pipeline.StepOutcome{}, nil
+		} else if state == scm.PRStateOpen {
+			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+				return nil, err
+			}
 		}
 
 		// Check mergeable state if the provider supports it
@@ -280,6 +299,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		pr.HeadSHA = sctx.Run.HeadSHA
 		checks, err := host.GetChecks(ctx, pr)
 		if err != nil {
+			clearCIMonitorReady(sctx)
 			lastMonitorLog = ""
 			sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
 		} else {
@@ -300,6 +320,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				s.lastFixedCompletedAt = nil
 			}
 
+			if hasIssues {
+				if err := sctx.DB.SetRunCIReady(sctx.Run.ID, false); err != nil {
+					return nil, err
+				}
+			}
 			if hasIssues && pending {
 				lastMonitorLog = ""
 				if pendingCheckMatchesLastFixed(checks, s.lastFixedChecks) {
@@ -365,6 +390,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				s.lastFixedCompletedAt = nil
 				switch {
 				case !prStateKnown || !mergeabilityKnown:
+					clearCIMonitorReady(sctx)
 					lastMonitorLog = ""
 				case pending:
 					// Checks are (re-)running with no failures yet. Surface this
@@ -372,6 +398,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// previous passed-checks signal instead of looking stale.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
 				case len(checks) == 0 && elapsed < s.gracePeriod():
+					clearCIMonitorReady(sctx)
 					// CI checks may not be registered yet, keep polling.
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
@@ -413,7 +440,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {
 	if message != previous {
+		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
+		if err := sctx.DB.SetRunCIReady(sctx.Run.ID, ready); err != nil {
+			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
+		}
 		sctx.Log(message)
 	}
 	return message
+}
+
+func clearCIMonitorReady(sctx *pipeline.StepContext) {
+	if err := sctx.DB.SetRunCIReady(sctx.Run.ID, false); err != nil {
+		sctx.Log(fmt.Sprintf("warning: could not clear CI readiness: %v", err))
+	}
 }

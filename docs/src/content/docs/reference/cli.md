@@ -70,8 +70,9 @@ If an active run object is parked at a decision gate, it includes `awaiting_agen
 That field is observability only; the `gate:` object still tells the agent which response to send.
 If a step is actively `running` or `fixing`, the run object can also include an `active_steps` table with `active_for`, `last_activity`, native `agent_pid` when one is currently running, and the current execution or fix round.
 When only another branch has an active run, that run appears as `other_branch_active_run`; the help tells agents to leave it alone and start validation for the current branch.
-AXI help and outputs also repeat the preserve-prior-gate-progress contract: after a gate round has already produced fix commits, additional fixes belong on the same branch followed by a fresh `no-mistakes axi run --intent "..."` with the original user intent.
-Agents must not abort-and-restart, reset, or create a replacement branch in a way that drops prior gate-fix commits.
+AXI help and outputs always repeat the preserve-prior-gate-progress contract: after a gate round has already produced fix commits, additional fixes belong on the same branch.
+When a relevant `branch_sync` object is present, they also include version-matched synchronization guidance to follow before a post-pipeline local commit or fresh run.
+Agents must not abort-and-restart, reset, replace the branch, or improvise Git recovery in a way that drops prior gate-fix commits.
 A fresh run re-validates the current branch state, so already-resolved findings do not re-surface.
 
 ## no-mistakes axi run
@@ -158,6 +159,29 @@ When the resolved run has a `running` or `fixing` step, the run object includes 
 Each row reports how long the step has been active, the latest meaningful log or native-agent lifecycle activity, the native agent PID if one is currently running, and the current round such as `round 1`, `auto-fix 1/3`, or `fix 2`.
 If no activity arrives for longer than `step_quiet_warning`, `last_activity` is prefixed with `quiet`; this is only a liveness signal and does not cancel the step.
 For older active runs with no recorded activity timestamp, AXI falls back to the step log file modification time.
+Relevant current-branch states also include a cached `branch_sync` object with full SHAs, the persisted pipeline push binding, target kind and ref, relation, safety result, PR lifecycle, and a structured next action.
+Cached home and status rendering performs no network read and labels the remote observation `pipeline_push`; only explicit sync check or apply reports `live` freshness.
+
+## no-mistakes axi sync
+
+Freshly check or apply the guarded synchronization offered by a `branch_sync.next_action`.
+
+```sh
+no-mistakes axi sync --check
+no-mistakes axi sync
+```
+
+| Flag      | Type   | Default | Description                                                    |
+| --------- | ------ | ------- | -------------------------------------------------------------- |
+| `--check` | `bool` | `false` | Verify the live target and exact plan without changing `HEAD` |
+
+The default command is an explicit non-interactive apply request and never prompts.
+Both modes return the complete `branch_sync` object as TOON.
+Exit code `0` means an eligible check, applied synchronization, already-synchronized no-op, or expected merged-and-removed no-op; blocked operational states return `1`.
+The only possible worktree mutation is a strict fast-forward of the invoking clean checked-out branch to the freshly verified pipeline-owned pushed SHA.
+Fork configurations verify the configured fork URL and exact feature ref rather than assuming `origin`.
+Dirty, in-progress, ahead, diverged, detached, wrong-branch, offline, changed-target, rewritten, deleted, legacy, or retired states fail closed without destructive recovery.
+Run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
 
 ## no-mistakes axi watch
 
@@ -299,9 +323,28 @@ Starts a new pipeline run using the last-known head SHA on the current branch.
 If another run is active on that branch, rerun cancels it before starting over.
 Treat rerun as a between-runs action after a failed or cancelled outcome, or after you have committed a separate fix outside an active run; do not use it to bypass a gate.
 
+## no-mistakes sync
+
+Freshly verify and, with confirmation, safely fast-forward the invoking branch to an exact pipeline-owned push binding.
+
+```sh
+no-mistakes sync
+no-mistakes sync --check
+no-mistakes sync --yes
+```
+
+| Flag          | Type   | Default | Description                                                     |
+| ------------- | ------ | ------- | --------------------------------------------------------------- |
+| `--check`     | `bool` | `false` | Verify and print the fresh plan without changing `HEAD`         |
+| `-y`, `--yes` | `bool` | `false` | Apply an eligible strict fast-forward without an interactive prompt |
+
+Without `--yes`, apply prints the exact full-SHA plan and requires TTY confirmation.
+A non-TTY apply refuses with a direct `--yes` hint.
+The command uses the same service and safety contract as `no-mistakes axi sync`; it never resets, stashes, rebases, creates a merge commit, switches branches, deletes a branch, or updates a remote.
+
 ## no-mistakes status
 
-Show repo, daemon, and active run status.
+Show repo, daemon, active run, and relevant cached local-branch synchronization status.
 
 ```sh
 no-mistakes status
