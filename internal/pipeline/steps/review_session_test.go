@@ -229,7 +229,7 @@ func TestReviewLoop_OneReviewerSessionOneFixerSession(t *testing.T) {
 
 // TestReviewLoop_ParkRespondFixKeepsRoleSessions parks the review step at an
 // ask-user gate, responds with a fix action, and proves the user-driven fix
-// turn and the follow-up full rereview keep their role sessions.
+// turn and the follow-up focused rereview keep their role sessions.
 func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 	reviewRound := 0
 	mock := &sessionMockAgent{}

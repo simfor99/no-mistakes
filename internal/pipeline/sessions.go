@@ -10,9 +10,10 @@ import (
 )
 
 // SessionRole identifies which durable review-loop session an invocation
-// belongs to. The reviewer role spans the initial full review and every full
-// rereview in a run; the fixer role spans every review-fix turn. The two are
-// never mixed, so the reviewer never inherits the fixer's working context.
+// belongs to. The reviewer role spans the initial full review and focused
+// rereviews of new fix ranges in a run; the fixer role spans every review-fix
+// turn. The two are never mixed, so the reviewer never inherits the fixer's
+// working context.
 type SessionRole string
 
 const (

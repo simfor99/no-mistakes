@@ -111,9 +111,29 @@ func TestAxiAgentJourney(t *testing.T) {
 	}
 
 	// The daemon should now hold the run at the review gate.
-	if gated := waitForStepStatus(t, h, "feature/axi", types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second); gated == nil {
+	gated := waitForStepStatus(t, h, "feature/axi", types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second)
+	if gated == nil {
 		t.Fatal("expected feature/axi run to be awaiting approval")
 	}
+	watchOut, err := h.RunInDir(fw, "axi", "watch", "--run", gated.ID, "--until", "attention")
+	if err != nil {
+		t.Fatalf("axi watch at a review gate: %v\n%s", err, watchOut)
+	}
+	for _, want := range []string{
+		"watch:",
+		"stop: gate",
+		"terminal: false",
+		"supervision: active_agent_required",
+		"auto_resumed: false",
+		"gate:",
+		"step: review",
+		"potential nil deref",
+	} {
+		if !strings.Contains(watchOut, want) {
+			t.Errorf("axi watch gate output missing %q in:\n%s", want, watchOut)
+		}
+	}
+	t.Logf("active-driver handoff shown by axi watch:\n%s", watchOut)
 
 	doneOut, err := h.RunInDir(fw, "axi", "respond", "--action", "approve")
 	if err != nil {

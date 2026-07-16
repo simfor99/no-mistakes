@@ -65,7 +65,8 @@ type GlobalConfig struct {
 	DaemonConnectTimeout    time.Duration       `yaml:"-"`
 	LogLevel                string              `yaml:"log_level"`
 	// SessionReuse controls per-run, per-role agent session reuse in the
-	// review loop (one durable reviewer session across full reviews, a
+	// review loop (one durable reviewer session across the initial full review
+	// and focused rereviews of new fix ranges, a
 	// separate durable fixer session across fix turns). Default true; set
 	// session_reuse: false to force every invocation cold.
 	SessionReuse bool `yaml:"-"`
@@ -362,7 +363,8 @@ review_max_duration: "45m"
 daemon_connect_timeout: "3s"
 
 # Reuse one durable agent session per run for the review loop: the reviewer
-# keeps a single session across the initial review and every full rereview,
+# keeps a single session across the initial review and every focused rereview
+# of a new fix range,
 # and review fixes keep a separate fixer session. Roles never share a session.
 # Supported for claude and codex; other agents run cold. Set false to force
 # every agent invocation cold.
