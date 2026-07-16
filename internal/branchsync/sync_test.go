@@ -168,6 +168,7 @@ func TestApplyCleanStrictBehindFastForwardsExactBoundHead(t *testing.T) {
 func TestApplyReportsHonestFinalStateWhenPostMergeHookMutatesWorktree(t *testing.T) {
 	f := newSyncFixture(t)
 	hooks := filepath.Join(f.local, ".git", "hooks")
+	mustRun(t, f.local, "config", "core.hooksPath", hooks)
 	hook := filepath.Join(hooks, "post-merge")
 	mustWrite(t, hook, "#!/bin/sh\nprintf hook > hook-output.txt\nexit 1\n")
 	if err := os.Chmod(hook, 0o755); err != nil {
