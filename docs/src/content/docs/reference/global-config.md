@@ -263,8 +263,8 @@ warning or the pipeline itself.
 The heartbeat interval is deliberately fixed at five minutes. A value of `4`
 therefore shows up to four unchanged heartbeats before the next deadline
 pauses the local supervisor. A meaningful authoritative run update resets the
-budget. The hook timeout must be configured separately in Codex and should be
-at least 360 seconds.
+budget. The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-axi-supervise)
+owns the separate Codex Stop-hook timeout preflight.
 
 ### daemon_connect_timeout
 

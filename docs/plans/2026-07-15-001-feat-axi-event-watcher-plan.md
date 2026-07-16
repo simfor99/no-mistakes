@@ -60,8 +60,9 @@ ich regelmäßig nach dem Status fragen muss.
 
 Smart Commit kennt die Run-ID und aktiviert `axi supervise arm --run <id>`.
 Der Codex-Stop-Hook erhält beim Ende des aktuellen Turns die Session-ID,
-übernimmt ausschließlich diese gerüstete Run-ID und ruft `axi watch --until
-attention` synchron auf. Für einen neuen technischen Fortschritt, einen
+übernimmt ausschließlich diese gerüstete Run-ID und beobachtet sie über eine
+direkte, read-only Daemon-Subscription. Er ruft nicht `axi watch` und startet
+keinen zweiten Codex-Prozess. Für einen neuen technischen Fortschritt, einen
 Heartbeat oder einen terminalen Zustand speichert er den Stoppgrund und gibt
 ein begrenztes offizielles Stop-Hook-Signal zurück. Codex setzt dadurch
 dieselbe Sitzung mit einem Ereignis-Prompt fort. Die fortgesetzte Runde
@@ -74,9 +75,9 @@ Supervision auf `awaiting_user` gesetzt und der Hook lässt den Turn anschließe
 wirklich enden. Die automatische Kette pausiert, bis dieselbe Session Simons
 Antwort erhalten hat und danach erneut endet; erst dann darf die nächste
 Watch-Phase beginnen. Ist der Run terminal, wird die Registrierung als
-abgeschlossen markiert. Quiet ist kein Simon-Gate, aber ein begrenzter,
-neu geplanter Heartbeat: Nach dessen sichtbarer Statusmeldung beginnt die
-nächste Wartefrist erst ab diesem Handoff, niemals sofort erneut.
+abgeschlossen markiert. Quiet ist kein eigener Supervisionszustand; die
+direkte Subscription wartet stattdessen bis zum nächsten Ereignis oder zur
+festen, nach jedem sichtbaren Handoff neu geplanten Heartbeat-Frist.
 
 `--until terminal` bleibt eine rein beobachtende Variante. Sie gibt nur den
 terminalen Snapshot aus und beobachtet Gate, `checks-passed` und Quiet ohne
@@ -123,12 +124,12 @@ schafft keine neue Bedienoberfläche, Rolle oder Administrationsaktion.
 - R10: `axi codex-hook` akzeptiert ausschließlich Codex-Stop-Hook-JSON über
   stdin. Es verlangt `Stop`, nichtleere `session_id` und `turn_id` sowie einen
   kanonischen `cwd`; `stop_hook_active` wird nur als Kontext geparst. Vor
-  Claim und vor jedem Handoff prüft es atomar, dass der aktuelle Repository-
-  Root zum gespeicherten `repo_id` passt und `run.repo_id == reg.repo_id`
-  gilt. Bei fehlendem Input oder jeder Abweichung gibt es kein
-  Fortsetzungssignal und die Registrierung wird mit einer begrenzten Diagnose
-  pausiert.
-- R11: Der Hook verwendet den read-only Watch-Contract und gibt bei einem
+  Claim und vor jedem Handoff prüft es, dass der aktuelle Repository-Root zum
+  gespeicherten `repo_id` passt und `run.repo_id == reg.repo_id` gilt.
+  Fehlender, fehlerhafter oder nicht passender Input bleibt ohne
+  Fortsetzungssignal; eine festgestellte Bindungsabweichung pausiert die
+  beanspruchte Registrierung mit einer begrenzten Diagnose.
+- R11: Der Hook verwendet eine direkte read-only Run-Subscription und gibt bei einem
   neuen technischen Ereignis, Heartbeat oder terminalen Ergebnis genau ein
   gültiges Stop-Hook-Fortsetzungssignal `{ "decision": "block", "reason":
   "..." }` zurück. `reason` stammt ausschließlich aus einer festen Allowlist

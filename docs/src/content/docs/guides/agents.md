@@ -161,8 +161,6 @@ Agents can also call `no-mistakes axi` directly:
 ```sh
 no-mistakes axi run --intent "the user's goal"
 no-mistakes axi status
-no-mistakes axi watch --run <id> --until attention
-no-mistakes axi supervise arm --run <id>
 no-mistakes axi respond --action approve
 no-mistakes axi logs --step review --full
 no-mistakes axi abort
@@ -173,11 +171,8 @@ When an agent makes an additional fix after a gate round has already produced fi
 Never abort-and-restart, reset the branch, or open a new branch in a way that drops prior gate-fix commits, including the pipeline's own `no-mistakes(review|document|lint): ...` commits.
 A fresh run re-validates the branch's current state, so already-resolved findings do not re-surface.
 
-The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, or relay `ask-user` findings, and how to interpret `axi status` fields like `awaiting_agent` and `active_steps` - is owned by the skill itself and by the live `axi` output. When a Codex-supervised flow needs to wait while its current turn remains open, keep `axi watch --run <id> --until attention` in the foreground. It returns at a gate, checks-passed, a quiet active step, or a terminal outcome to the same active agent turn; that turn reacts and starts a new watch after any explicit response.
-
-If Codex may return from the turn while the run is still active, first arm the known run with `axi supervise arm --run <id>` and use the reviewed, opt-in `axi codex-hook` Stop-hook adapter from the CLI reference. It holds the same Stop event for a technical AXI event or a five-minute heartbeat; it does not launch `codex exec resume` or any second Codex process. Use only one Codex session for that supervised worktree chain. It must never be installed silently or answer a gate by itself. At an `ask-user` gate it pauses for Simon; after the same session handles the answer and later ends, it can attach the next watch phase for that run. A watcher fault, checks-passed handoff, or exhausted stale-heartbeat budget pauses automatic repeats.
+The full driving protocol - how to read the home view and `gate:` objects, when to respond, fix, approve, or relay `ask-user` findings, how to interpret `axi status` fields like `awaiting_agent` and `active_steps`, and how to use `axi watch` or the opt-in Codex supervisor - is owned by the installed skill and the live `axi` output. The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-axi-watch) documents those commands for humans.
 Each `axi` response carries version-matched `help` lines for its state, and `no-mistakes axi run --help`, `no-mistakes axi respond --help`, and `no-mistakes axi watch --help` describe the loop authoritatively for the installed binary, so agents driving a gate never need this page open.
-The [CLI reference](/no-mistakes/reference/cli/) documents each `axi` command and output field for humans.
 
 ## Binary resolution
 
