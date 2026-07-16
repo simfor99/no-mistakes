@@ -404,7 +404,7 @@ func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, runID
 func ciReadyToMerge(rv runView, ciLogs []string) bool {
 	for _, s := range rv.Steps {
 		if s.Name == string(types.StepCI) {
-			return s.Status == string(types.StepStatusRunning) && cimonitor.ChecksPassed(ciLogs)
+			return s.Status == string(types.StepStatusRunning) && (rv.CIReady || cimonitor.ChecksPassed(ciLogs))
 		}
 	}
 	return false

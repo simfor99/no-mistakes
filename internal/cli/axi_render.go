@@ -96,6 +96,7 @@ type runView struct {
 	HeadSHA string
 	PRURL   string
 	Error   string
+	CIReady bool
 	// AwaitingAgentSince is the unix-seconds time the run parked at a gate
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
@@ -109,6 +110,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		Branch:             r.Branch,
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
+		CIReady:            r.CIReady,
 		AwaitingAgentSince: r.AwaitingAgentSince,
 	}
 	if r.PRURL != nil {
@@ -151,6 +153,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 		Branch:             r.Branch,
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
+		CIReady:            r.CIReadyAt != nil,
 		AwaitingAgentSince: r.AwaitingAgentSince,
 	}
 	if r.PRURL != nil {

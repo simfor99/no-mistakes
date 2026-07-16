@@ -170,6 +170,54 @@ func TestClassifySupervisorRunRecognizesTechnicalGateAndTerminal(t *testing.T) {
 	}
 }
 
+func TestClassifySupervisorRunUsesPersistedCIReadiness(t *testing.T) {
+	run := &ipc.RunInfo{
+		ID:      "run",
+		Status:  types.RunRunning,
+		CIReady: true,
+		Steps:   []ipc.StepResultInfo{{StepName: types.StepCI, Status: types.StepStatusRunning}},
+	}
+	if got := classifySupervisorRun(run, func(string) []string { return nil }); got != supervisorChecksPassed {
+		t.Fatalf("classifySupervisorRun() = %q, want %q", got, supervisorChecksPassed)
+	}
+}
+
+func TestApplySupervisorOutcomeDeduplicatesRepeatedStopEvent(t *testing.T) {
+	previous := supervisionNow
+	supervisionNow = func() time.Time { return time.Unix(1_000, 0) }
+	t.Cleanup(func() { supervisionNow = previous })
+
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	store := supervision.NewStore(p.SupervisionDir())
+	if _, err := store.Arm(supervision.Registration{RunID: "run", RepoID: "repo", CWD: "/work"}); err != nil {
+		t.Fatal(err)
+	}
+	reg, ok, err := store.Claim("/work", "session")
+	if err != nil || !ok {
+		t.Fatalf("Claim() = (%+v, %v, %v)", reg, ok, err)
+	}
+	run := &ipc.RunInfo{ID: "run", RepoID: "repo", Status: types.RunRunning, UpdatedAt: 7}
+	event := supervisorHookEvent{SessionID: "session", HandoffID: "turn"}
+
+	var first bytes.Buffer
+	applySupervisorOutcome(store, p, reg, event, supervisorHeartbeat, run, &first)
+	if got, want := first.String(), `{"decision":"block","reason":"nm_event=heartbeat"}`+"\n"; got != want {
+		t.Fatalf("first Stop output = %q, want %q", got, want)
+	}
+	reg, ok, err = store.Get("run")
+	if err != nil || !ok {
+		t.Fatalf("Get() = (%+v, %v, %v)", reg, ok, err)
+	}
+	var repeated bytes.Buffer
+	applySupervisorOutcome(store, p, reg, event, supervisorHeartbeat, run, &repeated)
+	if got := repeated.String(); got != "" {
+		t.Fatalf("repeated Stop output = %q, want no continuation", got)
+	}
+}
+
 func TestApplySupervisorOutcomeBoundsReasonsAndPausesAfterStaleBudget(t *testing.T) {
 	for _, budget := range []int{1, 4, 6} {
 		t.Run("budget-"+string(rune('0'+budget)), func(t *testing.T) {

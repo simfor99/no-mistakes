@@ -420,7 +420,7 @@ func applySupervisorOutcome(store *supervision.Store, p *paths.Paths, reg superv
 	if outcome == supervisorNone {
 		return
 	}
-	fingerprint := supervisorFingerprint(outcome, run, reg.NextHeartbeatAt)
+	fingerprint := supervisorFingerprint(outcome, run)
 	nextHeartbeat := supervisionNow().Add(supervisionHeartbeat).Unix()
 	stale := reg.StaleHeartbeats
 	phase := supervision.PhaseHandoffInProgress
@@ -462,8 +462,8 @@ func applySupervisorOutcome(store *supervision.Store, p *paths.Paths, reg superv
 	_, _ = io.WriteString(out, `{"decision":"block","reason":"`+reason+`"}`+"\n")
 }
 
-func supervisorFingerprint(outcome supervisorOutcome, run *ipc.RunInfo, deadline int64) string {
-	return string(outcome) + "|" + supervisorProgressFingerprint(run) + fmt.Sprintf("|%d", deadline)
+func supervisorFingerprint(outcome supervisorOutcome, run *ipc.RunInfo) string {
+	return string(outcome) + "|" + supervisorProgressFingerprint(run)
 }
 
 func supervisorProgressFingerprint(run *ipc.RunInfo) string {
