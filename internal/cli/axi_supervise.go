@@ -110,11 +110,18 @@ func runAxiSuperviseArm(cmd *cobra.Command, runID string) error {
 	if err != nil {
 		return emitError(cmd, 1, "resolve current worktree root")
 	}
+	branch, err := git.CurrentBranch(cmd.Context(), gitRoot)
+	if err != nil || branch == "HEAD" {
+		return emitError(cmd, 1, "resolve current worktree branch")
+	}
+	if run.Branch != branch {
+		return emitError(cmd, 1, fmt.Sprintf("run %q belongs to branch %q, not current branch %q", runID, run.Branch, branch))
+	}
 	cwd, err := canonicalSupervisorCWD(gitRoot)
 	if err != nil {
 		return emitError(cmd, 1, err.Error())
 	}
-	reg, err := supervision.NewStore(env.p.SupervisionDir()).Arm(supervision.Registration{RunID: runID, RepoID: env.repo.ID, CWD: cwd})
+	reg, err := supervision.NewStore(env.p.SupervisionDir()).Arm(supervision.Registration{RunID: runID, RepoID: env.repo.ID, CWD: cwd, Branch: branch})
 	if err != nil {
 		return emitError(cmd, 1, err.Error())
 	}
@@ -201,19 +208,33 @@ func runAxiCodexHook(in io.Reader, out io.Writer) error {
 		})
 		return nil
 	}
+	if !supervisionBranchMatches(context.Background(), cwd, reg.Branch) {
+		_, _, _ = store.UpdateForSession(reg.RunID, event.SessionID, func(reg *supervision.Registration) {
+			reg.Phase, reg.Error = supervision.PhasePaused, "branch_binding_mismatch"
+		})
+		return nil
+	}
 
 	outcome, run, err := waitForSupervisorEvent(p, reg)
 	if err != nil {
 		outcome = supervisorWatchFault
 	}
-	if run != nil && run.RepoID != reg.RepoID {
+	if run != nil && (run.RepoID != reg.RepoID || run.Branch != reg.Branch) {
 		_, _, _ = store.UpdateForSession(reg.RunID, event.SessionID, func(reg *supervision.Registration) {
-			reg.Phase, reg.Error = supervision.PhasePaused, "run_repo_mismatch"
+			reg.Phase, reg.Error = supervision.PhasePaused, "run_binding_mismatch"
 		})
 		return nil
 	}
 	applySupervisorOutcome(store, p, reg, event, outcome, run, out)
 	return nil
+}
+
+func supervisionBranchMatches(ctx context.Context, cwd, branch string) bool {
+	if strings.TrimSpace(branch) == "" {
+		return false
+	}
+	current, err := git.CurrentBranch(ctx, cwd)
+	return err == nil && current == branch
 }
 
 func supervisionRepoMatches(d interface {
@@ -261,16 +282,20 @@ func waitForSupervisorEvent(p *paths.Paths, reg supervision.Registration) (super
 	if outcome := classifySupervisorRun(run, ciLogReader(p)); outcome != supervisorNone {
 		return outcome, run, nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	deadline := supervisorHeartbeatDeadline(reg)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	events, unsubscribe, err := ipc.SubscribeContext(ctx, p.Socket(), &ipc.SubscribeParams{RunID: reg.RunID})
 	if err != nil {
 		return supervisorWatchFault, run, err
 	}
 	defer unsubscribe()
-	deadline := time.Unix(reg.NextHeartbeatAt, 0)
-	if reg.NextHeartbeatAt == 0 || !deadline.After(supervisionNow()) {
-		deadline = supervisionNow().Add(supervisionHeartbeat)
+	run, err = read()
+	if err != nil || run == nil {
+		return supervisorWatchFault, run, err
+	}
+	if outcome := classifySupervisorRun(run, ciLogReader(p)); outcome != supervisorNone {
+		return outcome, run, nil
 	}
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
@@ -298,6 +323,14 @@ func waitForSupervisorEvent(p *paths.Paths, reg supervision.Registration) (super
 			}
 		}
 	}
+}
+
+func supervisorHeartbeatDeadline(reg supervision.Registration) time.Time {
+	deadline := time.Unix(reg.NextHeartbeatAt, 0)
+	if reg.NextHeartbeatAt == 0 || !deadline.After(supervisionNow()) {
+		return supervisionNow().Add(supervisionHeartbeat)
+	}
+	return deadline
 }
 
 func classifySupervisorRun(run *ipc.RunInfo, logs func(string) []string) supervisorOutcome {

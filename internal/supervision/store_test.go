@@ -1,6 +1,7 @@
 package supervision
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -73,6 +74,17 @@ func TestStoreUsesRunScopedFiles(t *testing.T) {
 	}
 	if got, want := store.Path("run-1"), filepath.Join(dir, "run-1.json"); got != want {
 		t.Fatalf("Path() = %q, want %q", got, want)
+	}
+}
+
+func TestStoreRecoversFromStaleClaimLockFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".claim.lock"), []byte("stale"), 0o600); err != nil {
+		t.Fatalf("write stale lock: %v", err)
+	}
+	store := NewStore(dir)
+	if _, err := store.Arm(Registration{RunID: "run-1", RepoID: "repo-1", CWD: "/work"}); err != nil {
+		t.Fatalf("Arm() with stale lock file error = %v", err)
 	}
 }
 

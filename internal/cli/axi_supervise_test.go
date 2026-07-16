@@ -2,11 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -21,6 +23,30 @@ func TestCanonicalSupervisorCWD(t *testing.T) {
 	}
 	if got == "." || !strings.HasPrefix(got, "/") {
 		t.Fatalf("canonicalSupervisorCWD() = %q, want absolute clean path", got)
+	}
+}
+
+func TestSupervisionBranchMatchesCurrentWorktree(t *testing.T) {
+	repoDir := setupTestRepo(t)
+	run(t, repoDir, "git", "checkout", "-b", "feature/current")
+	if !supervisionBranchMatches(context.Background(), repoDir, "feature/current") {
+		t.Fatal("supervisionBranchMatches() = false, want current branch match")
+	}
+	if supervisionBranchMatches(context.Background(), repoDir, "feature/other") {
+		t.Fatal("supervisionBranchMatches() = true, want branch mismatch rejection")
+	}
+}
+
+func TestSupervisorHeartbeatDeadlineReusesFutureRegistrationDeadline(t *testing.T) {
+	previous := supervisionNow
+	supervisionNow = func() time.Time { return time.Unix(1_000, 0) }
+	t.Cleanup(func() { supervisionNow = previous })
+
+	if got := supervisorHeartbeatDeadline(supervision.Registration{NextHeartbeatAt: 1_030}); !got.Equal(time.Unix(1_030, 0)) {
+		t.Fatalf("supervisorHeartbeatDeadline() = %v, want existing deadline", got)
+	}
+	if got := supervisorHeartbeatDeadline(supervision.Registration{}); !got.Equal(time.Unix(1_300, 0)) {
+		t.Fatalf("supervisorHeartbeatDeadline() = %v, want five-minute deadline", got)
 	}
 }
 

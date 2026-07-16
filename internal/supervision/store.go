@@ -28,6 +28,7 @@ type Registration struct {
 	RunID                  string `json:"run_id"`
 	RepoID                 string `json:"repo_id"`
 	CWD                    string `json:"cwd"`
+	Branch                 string `json:"branch"`
 	SessionID              string `json:"session_id,omitempty"`
 	Phase                  Phase  `json:"phase"`
 	Fingerprint            string `json:"fingerprint,omitempty"`
@@ -52,11 +53,11 @@ func (s *Store) Arm(reg Registration) (Registration, error) {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return Registration{}, fmt.Errorf("create supervision directory: %w", err)
 	}
-	unlock, err := s.acquireClaimLock()
+	lock, err := acquireStoreLockWait(filepath.Join(s.dir, ".claim.lock"))
 	if err != nil {
 		return Registration{}, err
 	}
-	defer unlock()
+	defer lock.Release()
 	regs, err := s.all()
 	if err != nil {
 		return Registration{}, err
@@ -91,12 +92,12 @@ func (s *Store) Claim(cwd, sessionID string) (Registration, bool, error) {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return Registration{}, false, fmt.Errorf("create supervision directory: %w", err)
 	}
-	unlock, err := s.acquireClaimLock()
-	if os.IsExist(err) {
-		return Registration{}, false, nil
-	}
+	unlock, acquired, err := s.acquireClaimLock()
 	if err != nil {
 		return Registration{}, false, err
+	}
+	if !acquired {
+		return Registration{}, false, nil
 	}
 	defer unlock()
 	regs, err := s.all()
@@ -159,12 +160,12 @@ func (s *Store) UpdateForSession(runID, sessionID string, update func(*Registrat
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return Registration{}, false, fmt.Errorf("create supervision directory: %w", err)
 	}
-	unlock, err := s.acquireClaimLock()
-	if os.IsExist(err) {
-		return Registration{}, false, nil
-	}
+	unlock, acquired, err := s.acquireClaimLock()
 	if err != nil {
 		return Registration{}, false, err
+	}
+	if !acquired {
+		return Registration{}, false, nil
 	}
 	defer unlock()
 	reg, found, err := s.Get(runID)
@@ -189,12 +190,12 @@ func (s *Store) PrepareHandoff(runID, sessionID, turnID, eventFingerprint, progr
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return Registration{}, false, fmt.Errorf("create supervision directory: %w", err)
 	}
-	unlock, err := s.acquireClaimLock()
-	if os.IsExist(err) {
-		return Registration{}, false, nil
-	}
+	unlock, acquired, err := s.acquireClaimLock()
 	if err != nil {
 		return Registration{}, false, err
+	}
+	if !acquired {
+		return Registration{}, false, nil
 	}
 	defer unlock()
 	reg, found, err := s.Get(runID)
@@ -217,22 +218,26 @@ func (s *Store) PrepareHandoff(runID, sessionID, turnID, eventFingerprint, progr
 	return reg, true, nil
 }
 
-func (s *Store) acquireClaimLock() (func(), error) {
-	lock, err := os.OpenFile(filepath.Join(s.dir, ".claim.lock"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
+func (s *Store) acquireClaimLock() (func(), bool, error) {
+	lock, acquired, err := acquireStoreLock(filepath.Join(s.dir, ".claim.lock"))
+	if err != nil || !acquired {
+		return nil, acquired, err
 	}
-	if err := lock.Close(); err != nil {
-		_ = os.Remove(lock.Name())
-		return nil, fmt.Errorf("close registration lock: %w", err)
-	}
-	return func() { _ = os.Remove(lock.Name()) }, nil
+	return lock.Release, true, nil
 }
 
 func (s *Store) Save(reg Registration) error {
 	if strings.TrimSpace(reg.RunID) == "" {
 		return fmt.Errorf("run id is required")
 	}
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return fmt.Errorf("create supervision directory: %w", err)
+	}
+	lock, err := acquireStoreLockWait(filepath.Join(s.dir, ".claim.lock"))
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	reg.UpdatedAt = time.Now().UTC().Unix()
 	return s.write(reg)
 }
