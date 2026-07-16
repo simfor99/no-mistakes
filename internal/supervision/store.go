@@ -42,6 +42,12 @@ type Registration struct {
 	UpdatedAt              int64  `json:"updated_at"`
 }
 
+func (r *Registration) AdvanceClaudeTranscriptOffset(offset int64) {
+	if r.ClaudeTranscriptBound && offset >= r.ClaudeTranscriptOffset {
+		r.ClaudeTranscriptOffset = offset
+	}
+}
+
 type Store struct{ dir string }
 
 func NewStore(dir string) *Store { return &Store{dir: dir} }
@@ -243,9 +249,7 @@ func (s *Store) PrepareHandoff(runID, sessionID, turnID, eventFingerprint, progr
 	reg.Phase = phase
 	reg.LastHandoffTurnID = turnID
 	reg.LastHandoffFingerprint = eventFingerprint
-	if reg.ClaudeTranscriptBound && claudeTranscriptOffset >= reg.ClaudeTranscriptOffset {
-		reg.ClaudeTranscriptOffset = claudeTranscriptOffset
-	}
+	reg.AdvanceClaudeTranscriptOffset(claudeTranscriptOffset)
 	reg.Fingerprint = progressFingerprint
 	reg.NextHeartbeatAt = nextHeartbeatAt
 	reg.StaleHeartbeats = staleHeartbeats

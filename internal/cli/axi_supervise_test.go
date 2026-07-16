@@ -232,6 +232,30 @@ func TestClaudeTranscriptHandoffIDWaitsForPostArmTranscriptFlush(t *testing.T) {
 	}
 }
 
+func TestClaudeTranscriptHandoffIDScansPastLargePrefix(t *testing.T) {
+	previousWait := claudeTranscriptWait
+	previousChunk := claudeTranscriptScanChunk
+	previousLimit := claudeTranscriptScanLimit
+	claudeTranscriptWait = 0
+	claudeTranscriptScanChunk = 64
+	claudeTranscriptScanLimit = 512
+	t.Cleanup(func() {
+		claudeTranscriptWait = previousWait
+		claudeTranscriptScanChunk = previousChunk
+		claudeTranscriptScanLimit = previousLimit
+	})
+
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	prefix := `{"type":"user","uuid":"prefix","message":{"content":"` + strings.Repeat("x", 180) + `"}}` + "\n"
+	assistant := `{"type":"assistant","uuid":"current","message":{"content":"Done."}}` + "\n"
+	if err := os.WriteFile(transcript, []byte(prefix+assistant), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := claudeTranscriptHandoffID("session-1", transcript, "Done.", 0, ""); got == "" {
+		t.Fatal("large-prefix transcript handoff = empty, want matching assistant ID")
+	}
+}
+
 func TestClassifySupervisorRunFailsClosedForAskUserAndMalformedGates(t *testing.T) {
 	findings := `{"findings":[{"id":"decision","action":"ask-user"}]}`
 	for _, tc := range []struct {
@@ -309,6 +333,29 @@ func TestApplySupervisorOutcomeDeduplicatesRepeatedStopEvent(t *testing.T) {
 	applySupervisorOutcome(store, p, reg, event, supervisorHeartbeat, run, &repeated)
 	if got := repeated.String(); got != "" {
 		t.Fatalf("repeated Stop output = %q, want no continuation", got)
+	}
+}
+
+func TestApplySupervisorOutcomeAskUserAdvancesClaudeTranscriptOffset(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	store := supervision.NewStore(p.SupervisionDir())
+	if _, err := store.Arm(supervision.Registration{RunID: "run", RepoID: "repo", CWD: "/work", ClaudeTranscriptBound: true, ClaudeTranscriptOffset: 7}); err != nil {
+		t.Fatal(err)
+	}
+	reg, ok, err := store.Claim("/work", "session")
+	if err != nil || !ok {
+		t.Fatalf("Claim() = (%+v, %v, %v)", reg, ok, err)
+	}
+	applySupervisorOutcome(store, p, reg, supervisorHookEvent{SessionID: "session", HandoffID: "turn", TranscriptOffset: 11}, supervisorAskUser, &ipc.RunInfo{ID: "run", RepoID: "repo", Status: types.RunRunning}, io.Discard)
+	reg, ok, err = store.Get("run")
+	if err != nil || !ok {
+		t.Fatalf("Get() = (%+v, %v, %v)", reg, ok, err)
+	}
+	if reg.Phase != supervision.PhaseAwaitingUser || reg.ClaudeTranscriptOffset != 11 {
+		t.Fatalf("ask-user registration = %+v, want advanced awaiting-user registration", reg)
 	}
 }
 

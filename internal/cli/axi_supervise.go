@@ -32,6 +32,9 @@ var supervisionNow = time.Now
 var (
 	claudeTranscriptWait         = time.Second
 	claudeTranscriptPollInterval = 25 * time.Millisecond
+	claudeTranscriptScanChunk    = int64(1 << 20)
+	claudeTranscriptScanLimit    = int64(8 << 20)
+	claudeTranscriptRecordLimit  = int64(1 << 20)
 )
 
 // codexHookEvent is the stable subset of the official Codex command-hook
@@ -66,6 +69,19 @@ type supervisorHookEvent struct {
 	TranscriptPath   string
 	AssistantMessage string
 	TranscriptOffset int64
+}
+
+type claudeTranscriptCursor struct {
+	offset     int64
+	discarding bool
+	partial    []byte
+}
+
+type claudeTranscriptScan struct {
+	assistantID     string
+	assistantOffset int64
+	cursor          claudeTranscriptCursor
+	consumed        int64
 }
 
 type supervisorOutcome string
@@ -262,19 +278,49 @@ func claudeHookHandoffID(sessionID, assistantID string) string {
 
 func claudeTranscriptHandoffID(sessionID, transcriptPath, assistantMessage string, offset int64, previous string) (string, int64) {
 	deadline := time.Now().Add(claudeTranscriptWait)
+	cursor := claudeTranscriptCursor{offset: offset}
+	chunk := claudeTranscriptScanChunk
+	if chunk <= 0 {
+		chunk = 1 << 20
+	}
+	limit := claudeTranscriptScanLimit
+	if limit < chunk {
+		limit = chunk
+	}
+	var scanned int64
+	assistantID := ""
+	assistantOffset := offset
 	for {
-		assistantID, nextOffset := claudeTranscriptAssistantAfter(transcriptPath, assistantMessage, offset)
+		progressed := false
+		for scanned < limit {
+			budget := chunk
+			if remaining := limit - scanned; budget > remaining {
+				budget = remaining
+			}
+			result := claudeTranscriptAssistantAfter(transcriptPath, assistantMessage, cursor, budget)
+			if result.assistantID != "" {
+				assistantID, assistantOffset = result.assistantID, result.assistantOffset
+			}
+			if result.consumed == 0 {
+				break
+			}
+			cursor = result.cursor
+			scanned += result.consumed
+			progressed = true
+		}
 		handoffID := claudeHookHandoffID(sessionID, assistantID)
 		if handoffID != "" && handoffID != previous {
-			return handoffID, nextOffset
+			return handoffID, assistantOffset
 		}
-		if !time.Now().Before(deadline) {
+		if !time.Now().Before(deadline) || scanned >= limit {
 			if handoffID == "" && previous != "" {
 				return previous, offset
 			}
-			return handoffID, nextOffset
+			return handoffID, assistantOffset
 		}
-		time.Sleep(claudeTranscriptPollInterval)
+		if !progressed {
+			time.Sleep(claudeTranscriptPollInterval)
+		}
 	}
 }
 
@@ -289,31 +335,46 @@ func claudeTranscriptBoundaryOffset(path string) (int64, error) {
 	return info.Size(), nil
 }
 
-func claudeTranscriptAssistantAfter(path, assistantMessage string, offset int64) (string, int64) {
+func claudeTranscriptAssistantAfter(path, assistantMessage string, cursor claudeTranscriptCursor, maxBytes int64) claudeTranscriptScan {
 	file, err := os.Open(path)
 	if err != nil {
-		return "", offset
+		return claudeTranscriptScan{cursor: cursor}
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		return "", offset
+		return claudeTranscriptScan{cursor: cursor}
 	}
-	if offset < 0 || offset > info.Size() {
-		return "", offset
+	if maxBytes <= 0 || cursor.offset < 0 || cursor.offset > info.Size() {
+		return claudeTranscriptScan{cursor: cursor}
 	}
-	if _, err := file.Seek(offset, io.SeekStart); err != nil {
-		return "", offset
+	if _, err := file.Seek(cursor.offset, io.SeekStart); err != nil {
+		return claudeTranscriptScan{cursor: cursor}
 	}
-	reader := bufio.NewReader(io.LimitReader(file, 1<<20))
-	assistantID := ""
-	assistantOffset := offset
-	position := offset
+	reader := bufio.NewReader(io.LimitReader(file, maxBytes))
+	result := claudeTranscriptScan{cursor: cursor}
+	position := cursor.offset
 	for {
 		line, err := reader.ReadBytes('\n')
 		position += int64(len(line))
+		result.consumed += int64(len(line))
+		if len(line) == 0 && err != nil {
+			return result
+		}
+		if result.cursor.discarding {
+			if len(line) > 0 && line[len(line)-1] == '\n' {
+				result.cursor = claudeTranscriptCursor{offset: position}
+				continue
+			}
+			result.cursor = claudeTranscriptCursor{offset: position, discarding: true}
+			return result
+		}
 		if len(line) > 0 && line[len(line)-1] == '\n' {
 			line = line[:len(line)-1]
+			if len(result.cursor.partial) > 0 {
+				line = append(result.cursor.partial, line...)
+			}
+			result.cursor = claudeTranscriptCursor{offset: position}
 			var record struct {
 				Type    string `json:"type"`
 				UUID    string `json:"uuid"`
@@ -322,13 +383,18 @@ func claudeTranscriptAssistantAfter(path, assistantMessage string, offset int64)
 				} `json:"message"`
 			}
 			if json.Unmarshal(line, &record) == nil && record.Type == "assistant" && strings.TrimSpace(record.UUID) != "" && claudeTranscriptMessageMatches(record.Message.Content, assistantMessage) {
-				assistantID = record.UUID
-				assistantOffset = position
+				result.assistantID = record.UUID
+				result.assistantOffset = position
 			}
+			continue
 		}
-		if err != nil {
-			return assistantID, assistantOffset
+		if int64(len(result.cursor.partial)+len(line)) > claudeTranscriptRecordLimit {
+			result.cursor = claudeTranscriptCursor{offset: position, discarding: true}
+		} else {
+			result.cursor.offset = position
+			result.cursor.partial = append(result.cursor.partial, line...)
 		}
+		return result
 	}
 }
 
@@ -550,6 +616,7 @@ func applySupervisorOutcome(store *supervision.Store, p *paths.Paths, reg superv
 	case supervisorAskUser:
 		_, _, _ = store.UpdateForSession(reg.RunID, event.SessionID, func(reg *supervision.Registration) {
 			reg.Phase, reg.Fingerprint, reg.Error = supervision.PhaseAwaitingUser, supervisorProgressFingerprint(run), ""
+			reg.AdvanceClaudeTranscriptOffset(event.TranscriptOffset)
 		})
 		return
 	case supervisorTechnicalGate:
