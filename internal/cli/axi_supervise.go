@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -28,6 +29,11 @@ const supervisionHeartbeat = 5 * time.Minute
 
 var supervisionNow = time.Now
 
+var (
+	claudeTranscriptWait         = time.Second
+	claudeTranscriptPollInterval = 25 * time.Millisecond
+)
+
 // codexHookEvent is the stable subset of the official Codex command-hook
 // payload needed to bind an explicitly armed run to the session that ended.
 // stop_hook_active is intentionally context only: it is not a blanket veto.
@@ -40,9 +46,8 @@ type codexHookEvent struct {
 }
 
 // claudeHookEvent is the stable subset of the official Claude Code Stop-hook
-// payload. Claude does not expose a turn id, so a bounded opaque local
-// identifier is used only for duplicate suppression. Neither message nor
-// identifier is ever returned through the hook channel.
+// payload. Claude does not expose a turn id, so its transcript supplies the
+// opaque local identifier used only for duplicate suppression.
 type claudeHookEvent struct {
 	SessionID            string `json:"session_id"`
 	TranscriptPath       string `json:"transcript_path"`
@@ -55,9 +60,10 @@ type claudeHookEvent struct {
 // supervisorHookEvent is the provider-neutral, privacy-bounded event shape
 // needed after provider-specific payload validation has completed.
 type supervisorHookEvent struct {
-	SessionID string
-	HandoffID string
-	CWD       string
+	SessionID      string
+	HandoffID      string
+	CWD            string
+	TranscriptPath string
 }
 
 type supervisorOutcome string
@@ -227,23 +233,66 @@ func runAxiClaudeHook(in io.Reader, out io.Writer) error {
 	if event.HookEventName != "Stop" || strings.TrimSpace(event.SessionID) == "" {
 		return nil
 	}
-	handoffID := claudeHookHandoffID(event.SessionID, event.TranscriptPath, event.LastAssistantMessage)
-	if handoffID == "" {
+	if strings.TrimSpace(event.LastAssistantMessage) == "" {
 		return nil
 	}
-	return runAxiSupervisorHook(supervisorHookEvent{SessionID: event.SessionID, HandoffID: handoffID, CWD: event.CWD}, out)
+	return runAxiSupervisorHook(supervisorHookEvent{SessionID: event.SessionID, CWD: event.CWD, TranscriptPath: event.TranscriptPath}, out)
 }
 
-func claudeHookHandoffID(sessionID, transcriptPath, lastAssistantMessage string) string {
-	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(transcriptPath) == "" || strings.TrimSpace(lastAssistantMessage) == "" {
+func claudeHookHandoffID(sessionID, assistantID string) string {
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(assistantID) == "" {
 		return ""
 	}
-	info, err := os.Stat(transcriptPath)
+	sum := sha256.Sum256([]byte(sessionID + "\x00" + assistantID))
+	return "claude:" + hex.EncodeToString(sum[:])
+}
+
+func claudeTranscriptHandoffID(sessionID, transcriptPath, previous string) string {
+	deadline := time.Now().Add(claudeTranscriptWait)
+	for {
+		handoffID := claudeHookHandoffID(sessionID, claudeTranscriptAssistantID(transcriptPath))
+		if handoffID == "" || handoffID != previous || !time.Now().Before(deadline) {
+			return handoffID
+		}
+		time.Sleep(claudeTranscriptPollInterval)
+	}
+}
+
+func claudeTranscriptAssistantID(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
-	sum := sha256.Sum256([]byte(sessionID + "\x00" + lastAssistantMessage + fmt.Sprintf("\x00%d\x00%d", info.Size(), info.ModTime().UnixNano())))
-	return "claude:" + hex.EncodeToString(sum[:])
+	const maxTailBytes = 64 << 10
+	if info.Size() > maxTailBytes {
+		if _, err := file.Seek(-maxTailBytes, io.SeekEnd); err != nil {
+			return ""
+		}
+	}
+	reader := bufio.NewReader(file)
+	if info.Size() > maxTailBytes {
+		if _, err := reader.ReadString('\n'); err != nil && err != io.EOF {
+			return ""
+		}
+	}
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	assistantID := ""
+	for scanner.Scan() {
+		var record struct {
+			Type string `json:"type"`
+			UUID string `json:"uuid"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &record) == nil && record.Type == "assistant" && strings.TrimSpace(record.UUID) != "" {
+			assistantID = record.UUID
+		}
+	}
+	return assistantID
 }
 
 func runAxiSupervisorHook(event supervisorHookEvent, out io.Writer) error {
@@ -270,6 +319,12 @@ func runAxiSupervisorHook(event supervisorHookEvent, out io.Writer) error {
 		return nil
 	}
 	if reg.Phase == supervision.PhaseAwaitingMerge || reg.Phase == supervision.PhasePaused || reg.Phase == supervision.PhaseCompleted {
+		return nil
+	}
+	if event.TranscriptPath != "" {
+		event.HandoffID = claudeTranscriptHandoffID(event.SessionID, event.TranscriptPath, reg.LastHandoffTurnID)
+	}
+	if strings.TrimSpace(event.HandoffID) == "" || reg.LastHandoffTurnID == event.HandoffID {
 		return nil
 	}
 	if !supervisionRepoMatches(d, cwd, reg.RepoID) {

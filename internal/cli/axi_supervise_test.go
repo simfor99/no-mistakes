@@ -124,30 +124,31 @@ func TestClaudeHookIgnoresMalformedAndNonStopPayloads(t *testing.T) {
 	}
 }
 
-func TestClaudeHookHandoffIDDistinguishesTranscriptTurnsAndSuppressesDuplicates(t *testing.T) {
+func TestClaudeTranscriptHandoffIDDistinguishesTurnsAndSuppressesDuplicates(t *testing.T) {
+	previousWait := claudeTranscriptWait
+	claudeTranscriptWait = 0
+	t.Cleanup(func() { claudeTranscriptWait = previousWait })
+
 	transcript := filepath.Join(t.TempDir(), "session.jsonl")
-	if err := os.WriteFile(transcript, []byte("first turn\n"), 0o600); err != nil {
+	if err := os.WriteFile(transcript, []byte(`{"type":"assistant","uuid":"assistant-1"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	first := claudeHookHandoffID("session-1", transcript, "Done.")
-	duplicate := claudeHookHandoffID("session-1", transcript, "Done.")
+	first := claudeTranscriptHandoffID("session-1", transcript, "")
+	duplicate := claudeTranscriptHandoffID("session-1", transcript, first)
 	if first == "" || first != duplicate {
 		t.Fatalf("same Claude Stop IDs = %q, %q; want identical non-empty opaque IDs", first, duplicate)
 	}
-	if err := os.WriteFile(transcript, []byte("first turn\nsecond turn\n"), 0o600); err != nil {
+	if err := os.WriteFile(transcript, []byte(`{"type":"assistant","uuid":"assistant-1"}`+"\n"+`{"type":"assistant","uuid":"assistant-2"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	second := claudeHookHandoffID("session-1", transcript, "Done.")
+	second := claudeTranscriptHandoffID("session-1", transcript, first)
 	if second == "" || first == second {
 		t.Fatalf("successive same-message Claude Stop IDs = %q, %q; want distinct IDs", first, second)
 	}
-	if strings.Contains(first, "session-1") || strings.Contains(first, "Done.") {
+	if strings.Contains(first, "session-1") || strings.Contains(first, "assistant-1") {
 		t.Fatalf("claude hook ID leaks hook payload: %q", first)
 	}
-	if got := claudeHookHandoffID("session-1", transcript, ""); got != "" {
-		t.Fatalf("empty assistant message ID = %q, want empty", got)
-	}
-	if got := claudeHookHandoffID("session-1", filepath.Join(t.TempDir(), "missing.jsonl"), "Done."); got != "" {
+	if got := claudeTranscriptHandoffID("session-1", filepath.Join(t.TempDir(), "missing.jsonl"), first); got != "" {
 		t.Fatalf("missing transcript ID = %q, want empty", got)
 	}
 }
