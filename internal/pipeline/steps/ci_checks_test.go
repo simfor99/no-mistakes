@@ -75,6 +75,27 @@ func TestQueuedPendingChecksFingerprintResetsWhenOneQueuedRunIsReplaced(t *testi
 	}
 }
 
+func TestUpdateQueuedCheckTrackingOnlyBackdatesInitialObservation(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, time.July, 16, 9, 0, 0, 0, time.UTC)
+	oldest := now.Add(-10 * time.Minute)
+
+	signature, since := updateQueuedCheckTracking("", time.Time{}, "build@old,test@old", oldest, now)
+	if !since.Equal(oldest) {
+		t.Fatalf("initial queued time = %v, want oldest %v", since, oldest)
+	}
+
+	signature, since = updateQueuedCheckTracking(signature, since, "build@old,test@replacement", oldest, now)
+	if !since.Equal(now) {
+		t.Fatalf("replacement queued time = %v, want reset time %v", since, now)
+	}
+
+	_, sameSince := updateQueuedCheckTracking(signature, since, signature, oldest, now.Add(time.Minute))
+	if !sameSince.Equal(now) {
+		t.Fatalf("unchanged queued time = %v, want preserved reset time %v", sameSince, now)
+	}
+}
+
 func TestCIQueuedChecksOutcomeRequiresAttention(t *testing.T) {
 	t.Parallel()
 

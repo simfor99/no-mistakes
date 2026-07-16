@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+type wrappedProcessExitError struct {
+	cause *exec.ExitError
+}
+
+func (e *wrappedProcessExitError) Error() string { return "native agent process exited" }
+func (e *wrappedProcessExitError) Unwrap() error { return e.cause }
 
 func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 	database, p, run, repo := setupTest(t)
@@ -140,7 +148,7 @@ func TestExecutor_ReviewProgressGuardParksNativeProcessExitOnTimeout(t *testing.
 		name: types.StepReview,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			<-sctx.Ctx.Done()
-			return nil, errors.New("native agent process exited")
+			return nil, &wrappedProcessExitError{cause: &exec.ExitError{}}
 		},
 	}
 

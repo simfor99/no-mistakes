@@ -2,9 +2,11 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -29,6 +31,8 @@ const (
 	defaultGateReconcileInterval = 2 * time.Minute
 	defaultGateReconcileTimeout  = 30 * time.Second
 )
+
+var errReviewProgressGuardExpired = errors.New("review progress guard expired")
 
 type approvalResponse struct {
 	action        types.ApprovalAction
@@ -700,12 +704,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Approval waits below deliberately use the parent context so a human
 		// decision never consumes the autonomous no-progress window.
 		stepCtx := ctx
-		var cancelStep context.CancelFunc
+		var cancelStep context.CancelCauseFunc
 		var guardTimer *time.Timer
 		if reviewGuard != nil {
 			if remaining := reviewGuard.Remaining(time.Now()); remaining >= 0 {
-				stepCtx, cancelStep = context.WithCancel(ctx)
-				guardTimer = time.AfterFunc(remaining, cancelStep)
+				stepCtx, cancelStep = context.WithCancelCause(ctx)
+				guardTimer = time.AfterFunc(remaining, func() { cancelStep(errReviewProgressGuardExpired) })
 			}
 		}
 		sctx.Ctx = stepCtx
@@ -714,10 +718,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			guardTimer.Stop()
 		}
 		if cancelStep != nil {
-			cancelStep()
+			cancelStep(nil)
 		}
 		sctx.Ctx = ctx
-		if err != nil && reviewGuard != nil && ctx.Err() == nil && stepCtx.Err() != nil {
+		if err != nil && reviewGuard != nil && ctx.Err() == nil && errors.Is(context.Cause(stepCtx), errReviewProgressGuardExpired) && reviewGuardCancellationError(err) {
 			if reason, stopped := reviewGuard.StopReason(time.Now()); stopped {
 				now := time.Now()
 				writeLog(fmt.Sprintf("review progress guard stopped autonomous work: %s", reason))
@@ -983,6 +987,14 @@ done:
 	}
 	e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", "", &durationMS)
 	return skipRemaining, nil
+}
+
+func reviewGuardCancellationError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
 }
 
 func roundInsertID(_ string, inserted *db.StepRound, err error) string {

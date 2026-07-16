@@ -77,6 +77,16 @@ func queuedPendingChecks(checks []scm.Check) (names, signature string, oldest ti
 	return strings.Join(queued, ", "), strings.Join(instances, ","), oldest, true
 }
 
+func updateQueuedCheckTracking(previousSignature string, previousSince time.Time, signature string, oldest, now time.Time) (string, time.Time) {
+	if signature == previousSignature {
+		return previousSignature, previousSince
+	}
+	if previousSignature == "" && !oldest.IsZero() && oldest.Before(now) {
+		return signature, oldest
+	}
+	return signature, now
+}
+
 // failingCheckNames returns the names of failing checks.
 func failingCheckNames(checks []scm.Check) []string {
 	var names []string

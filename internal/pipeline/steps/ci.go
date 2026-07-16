@@ -340,13 +340,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				pending := hasPendingChecks(checks)
 				queuedNames, queuedSignature, queuedCreatedAt, onlyQueued := queuedPendingChecks(checks)
 				if onlyQueued {
-					if queuedChecksSignature != queuedSignature {
-						queuedChecksSignature = queuedSignature
-						queuedChecksSince = now()
-						if !queuedCreatedAt.IsZero() && queuedCreatedAt.Before(queuedChecksSince) {
-							queuedChecksSince = queuedCreatedAt
-						}
-					}
+					queuedChecksSignature, queuedChecksSince = updateQueuedCheckTracking(queuedChecksSignature, queuedChecksSince, queuedSignature, queuedCreatedAt, now())
 					if queuedFor := now().Sub(queuedChecksSince); queuedFor >= s.queuedAttentionAfter(sctx) {
 						sctx.Log(fmt.Sprintf("CI checks stayed queued without starting for %s; waiting for attention", queuedFor.Round(time.Second)))
 						return ciQueuedChecksOutcome(queuedNames, queuedFor), nil
