@@ -60,10 +60,11 @@ type claudeHookEvent struct {
 // supervisorHookEvent is the provider-neutral, privacy-bounded event shape
 // needed after provider-specific payload validation has completed.
 type supervisorHookEvent struct {
-	SessionID      string
-	HandoffID      string
-	CWD            string
-	TranscriptPath string
+	SessionID        string
+	HandoffID        string
+	CWD              string
+	TranscriptPath   string
+	AssistantMessage string
 }
 
 type supervisorOutcome string
@@ -236,7 +237,7 @@ func runAxiClaudeHook(in io.Reader, out io.Writer) error {
 	if strings.TrimSpace(event.LastAssistantMessage) == "" {
 		return nil
 	}
-	return runAxiSupervisorHook(supervisorHookEvent{SessionID: event.SessionID, CWD: event.CWD, TranscriptPath: event.TranscriptPath}, out)
+	return runAxiSupervisorHook(supervisorHookEvent{SessionID: event.SessionID, CWD: event.CWD, TranscriptPath: event.TranscriptPath, AssistantMessage: event.LastAssistantMessage}, out)
 }
 
 func claudeHookHandoffID(sessionID, assistantID string) string {
@@ -247,10 +248,10 @@ func claudeHookHandoffID(sessionID, assistantID string) string {
 	return "claude:" + hex.EncodeToString(sum[:])
 }
 
-func claudeTranscriptHandoffID(sessionID, transcriptPath, previous string) string {
+func claudeTranscriptHandoffID(sessionID, transcriptPath, assistantMessage, previous string) string {
 	deadline := time.Now().Add(claudeTranscriptWait)
 	for {
-		handoffID := claudeHookHandoffID(sessionID, claudeTranscriptAssistantID(transcriptPath))
+		handoffID := claudeHookHandoffID(sessionID, claudeTranscriptAssistantID(transcriptPath, assistantMessage))
 		if handoffID == "" || handoffID != previous || !time.Now().Before(deadline) {
 			return handoffID
 		}
@@ -258,7 +259,7 @@ func claudeTranscriptHandoffID(sessionID, transcriptPath, previous string) strin
 	}
 }
 
-func claudeTranscriptAssistantID(path string) string {
+func claudeTranscriptAssistantID(path, assistantMessage string) string {
 	file, err := os.Open(path)
 	if err != nil {
 		return ""
@@ -285,14 +286,38 @@ func claudeTranscriptAssistantID(path string) string {
 	assistantID := ""
 	for scanner.Scan() {
 		var record struct {
-			Type string `json:"type"`
-			UUID string `json:"uuid"`
+			Type    string `json:"type"`
+			UUID    string `json:"uuid"`
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
 		}
-		if json.Unmarshal(scanner.Bytes(), &record) == nil && record.Type == "assistant" && strings.TrimSpace(record.UUID) != "" {
+		if json.Unmarshal(scanner.Bytes(), &record) == nil && record.Type == "assistant" && strings.TrimSpace(record.UUID) != "" && claudeTranscriptMessageMatches(record.Message.Content, assistantMessage) {
 			assistantID = record.UUID
 		}
 	}
 	return assistantID
+}
+
+func claudeTranscriptMessageMatches(content json.RawMessage, expected string) bool {
+	var message string
+	if json.Unmarshal(content, &message) == nil {
+		return message == expected
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return false
+	}
+	var text strings.Builder
+	for _, block := range blocks {
+		if block.Type == "text" {
+			text.WriteString(block.Text)
+		}
+	}
+	return text.String() == expected
 }
 
 func runAxiSupervisorHook(event supervisorHookEvent, out io.Writer) error {
@@ -322,7 +347,7 @@ func runAxiSupervisorHook(event supervisorHookEvent, out io.Writer) error {
 		return nil
 	}
 	if event.TranscriptPath != "" {
-		event.HandoffID = claudeTranscriptHandoffID(event.SessionID, event.TranscriptPath, reg.LastHandoffTurnID)
+		event.HandoffID = claudeTranscriptHandoffID(event.SessionID, event.TranscriptPath, event.AssistantMessage, reg.LastHandoffTurnID)
 	}
 	if strings.TrimSpace(event.HandoffID) == "" || reg.LastHandoffTurnID == event.HandoffID {
 		return nil
