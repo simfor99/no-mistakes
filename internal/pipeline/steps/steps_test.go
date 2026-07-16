@@ -467,6 +467,7 @@ func fakeGitHubCheckRunsJSON(checksJSON string) string {
 		Status      string `json:"status"`
 		Conclusion  string `json:"conclusion"`
 		Bucket      string `json:"bucket"`
+		CreatedAt   string `json:"createdAt"`
 		CompletedAt string `json:"completedAt"`
 	}
 	if err := json.Unmarshal([]byte(checksJSON), &checks); err != nil {
@@ -478,6 +479,7 @@ func fakeGitHubCheckRunsJSON(checksJSON string) string {
 		Name        string `json:"name"`
 		Status      string `json:"status"`
 		Conclusion  string `json:"conclusion,omitempty"`
+		CreatedAt   string `json:"created_at,omitempty"`
 		CompletedAt string `json:"completed_at,omitempty"`
 	}, 0, len(checks))
 	for _, check := range checks {
@@ -486,9 +488,10 @@ func fakeGitHubCheckRunsJSON(checksJSON string) string {
 			Name        string `json:"name"`
 			Status      string `json:"status"`
 			Conclusion  string `json:"conclusion,omitempty"`
+			CreatedAt   string `json:"created_at,omitempty"`
 			CompletedAt string `json:"completed_at,omitempty"`
 		}{
-			Name: check.Name, Status: status, Conclusion: conclusion, CompletedAt: check.CompletedAt,
+			Name: check.Name, Status: status, Conclusion: conclusion, CreatedAt: check.CreatedAt, CompletedAt: check.CompletedAt,
 		})
 	}
 
@@ -508,6 +511,7 @@ func fakeGitHubCheckRunState(check struct {
 	Status      string `json:"status"`
 	Conclusion  string `json:"conclusion"`
 	Bucket      string `json:"bucket"`
+	CreatedAt   string `json:"createdAt"`
 	CompletedAt string `json:"completedAt"`
 }) (string, string) {
 	if check.Status != "" {

@@ -2,7 +2,9 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -382,6 +384,89 @@ func TestCIStep_AllChecksPassingKeepsMonitoringOpenPR(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected continued-monitoring CI log, got: %v", logs)
+	}
+}
+
+func TestCIStep_QueuedNativeGitHubChecksParkAfterConfiguredBudget(t *testing.T) {
+	t.Parallel()
+	queuedAt := time.Date(2026, time.July, 16, 8, 44, 0, 0, time.UTC)
+	current := queuedAt.Add(11 * time.Minute)
+
+	for _, tc := range []struct {
+		name          string
+		status        string
+		wantAttention bool
+	}{
+		{name: "all remaining checks queued", status: "queued", wantAttention: true},
+		{name: "a check is in progress", status: "in_progress", wantAttention: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			checksJSON := fmt.Sprintf(`[{"name":"build","status":%q,"createdAt":%q}]`, tc.status, queuedAt.Format(time.RFC3339))
+			commandLog := filepath.Join(t.TempDir(), "gh.log")
+			env := append(fakeCIGH(t, "OPEN", checksJSON), "FAKE_CLI_LOG="+commandLog)
+			prURL := "https://github.com/test/repo/pull/42"
+			sctx := newTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = env
+			sctx.Run.PRURL = &prURL
+			sctx.Config.CITimeout = -1
+			sctx.Config.CIQueueStallAfter = 10 * time.Minute
+
+			var logs []string
+			sctx.Log = func(message string) { logs = append(logs, message) }
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			sctx.Ctx = ctx
+			step := &CIStep{
+				now: func() time.Time { return current },
+				waitForNextPoll: func(ctx context.Context, _ time.Duration) error {
+					cancel()
+					return ctx.Err()
+				},
+			}
+
+			outcome, err := step.Execute(sctx)
+			if tc.wantAttention {
+				if err != nil {
+					t.Fatalf("Execute() error = %v", err)
+				}
+				if outcome == nil || !outcome.NeedsApproval {
+					t.Fatalf("queued checks outcome = %#v, want attention gate", outcome)
+				}
+				var findings Findings
+				if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+					t.Fatalf("unmarshal queued findings: %v", err)
+				}
+				if len(findings.Items) != 1 || findings.Items[0].Action != "ask-user" || !strings.Contains(findings.Items[0].Description, "build") {
+					t.Fatalf("queued gate findings = %+v, want one build ask-user finding", findings)
+				}
+				if !strings.Contains(strings.Join(logs, "\n"), "waiting for attention") {
+					t.Fatalf("queued gate did not log attention handoff: %v", logs)
+				}
+				if cimonitor.ChecksPassed(logs) {
+					t.Fatalf("queued check must not produce a checks-passed handoff: %v", logs)
+				}
+				commands, readErr := os.ReadFile(commandLog)
+				if readErr != nil {
+					t.Fatalf("read GitHub command log: %v", readErr)
+				}
+				for _, forbidden := range []string{"pr merge", "pr close", "run cancel"} {
+					if strings.Contains(string(commands), forbidden) {
+						t.Fatalf("queued-check monitor issued forbidden mutation %q: %s", forbidden, commands)
+					}
+				}
+				t.Logf("CI monitor transcript for native GitHub queued check:\n%s\nattention gate: %s\nGitHub activity (read-only):\n%s", strings.Join(logs, "\n"), outcome.Findings, commands)
+				return
+			}
+
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("in-progress check should keep normal monitoring, got outcome=%#v err=%v", outcome, err)
+			}
+			if strings.Contains(strings.Join(logs, "\n"), "waiting for attention") {
+				t.Fatalf("in-progress check incorrectly raised queued attention: %v", logs)
+			}
+			t.Logf("CI monitor transcript for native GitHub in-progress check:\n%s", strings.Join(logs, "\n"))
+		})
 	}
 }
 

@@ -243,11 +243,13 @@ How long the CI step may wait when every remaining GitHub check is explicitly
 
 Accepts any positive Go `time.ParseDuration` string. This is a focused stall
 guard, not a second CI timeout: it applies only when GitHub distinguishes the
-remaining checks as queued. A running check, an unknown provider state, a
-pending legacy status, or a changed queued-check set keeps normal CI monitoring
-in place. When the limit is reached, no-mistakes parks with a clear
-attention-needed finding; it never marks the check passed, cancels it, or
-merges the PR.
+remaining checks as queued. When GitHub supplies Check Run creation times, the
+oldest remaining queued run is the wait anchor; otherwise, monitoring starts
+the measurement when it first observes that queued set. A running check, an
+unknown provider state, or a pending legacy status keeps normal CI monitoring
+in place. A changed queued-check set resets the stall measurement. When the
+limit is reached, no-mistakes parks with a clear attention-needed finding; it
+never marks the check passed, cancels it, or merges the PR.
 
 ### step_quiet_warning
 
