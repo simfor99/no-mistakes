@@ -177,7 +177,14 @@ func Subscribe(socketPath string, params *SubscribeParams) (<-chan Event, func()
 // run. Cancellation closes the connection even while the server handshake is
 // pending, so callers can stop a watcher without affecting the pipeline run.
 func SubscribeContext(ctx context.Context, socketPath string, params *SubscribeParams) (<-chan Event, func(), error) {
-	if err := ctx.Err(); err != nil {
+	return SubscribeWithHandshakeContext(ctx, ctx, socketPath, params)
+}
+
+func SubscribeWithHandshakeContext(handshakeCtx, streamCtx context.Context, socketPath string, params *SubscribeParams) (<-chan Event, func(), error) {
+	if err := handshakeCtx.Err(); err != nil {
+		return nil, nil, err
+	}
+	if err := streamCtx.Err(); err != nil {
 		return nil, nil, err
 	}
 	conn, err := dialEndpoint(socketPath)
@@ -194,8 +201,20 @@ func SubscribeContext(ctx context.Context, socketPath string, params *SubscribeP
 	}
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-streamCtx.Done():
 			closeConn()
+		case <-stopContext:
+		}
+	}()
+	handshakeDone := make(chan struct{})
+	var handshakeOnce sync.Once
+	finishHandshake := func() { handshakeOnce.Do(func() { close(handshakeDone) }) }
+	defer finishHandshake()
+	go func() {
+		select {
+		case <-handshakeCtx.Done():
+			closeConn()
+		case <-handshakeDone:
 		case <-stopContext:
 		}
 	}()
@@ -211,7 +230,10 @@ func SubscribeContext(ctx context.Context, socketPath string, params *SubscribeP
 	}
 	if err := encoder.Encode(req); err != nil {
 		closeConn()
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := handshakeCtx.Err(); ctxErr != nil {
+			return nil, nil, ctxErr
+		}
+		if ctxErr := streamCtx.Err(); ctxErr != nil {
 			return nil, nil, ctxErr
 		}
 		return nil, nil, fmt.Errorf("send request: %w", err)
@@ -220,7 +242,10 @@ func SubscribeContext(ctx context.Context, socketPath string, params *SubscribeP
 	// Read initial response.
 	if !scanner.Scan() {
 		closeConn()
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		if ctxErr := handshakeCtx.Err(); ctxErr != nil {
+			return nil, nil, ctxErr
+		}
+		if ctxErr := streamCtx.Err(); ctxErr != nil {
 			return nil, nil, ctxErr
 		}
 		if err := scanner.Err(); err != nil {
@@ -237,6 +262,7 @@ func SubscribeContext(ctx context.Context, socketPath string, params *SubscribeP
 		closeConn()
 		return nil, nil, resp.Error
 	}
+	finishHandshake()
 
 	// Stream events.
 	ch := make(chan Event, 64)

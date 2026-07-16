@@ -283,9 +283,9 @@ func waitForSupervisorEvent(p *paths.Paths, reg supervision.Registration) (super
 		return outcome, run, nil
 	}
 	deadline := supervisorHeartbeatDeadline(reg)
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
-	defer cancel()
-	events, unsubscribe, err := ipc.SubscribeContext(ctx, p.Socket(), &ipc.SubscribeParams{RunID: reg.RunID})
+	handshakeCtx, cancelHandshake := context.WithDeadline(context.Background(), deadline)
+	events, unsubscribe, err := ipc.SubscribeWithHandshakeContext(handshakeCtx, context.Background(), p.Socket(), &ipc.SubscribeParams{RunID: reg.RunID})
+	cancelHandshake()
 	if err != nil {
 		return supervisorWatchFault, run, err
 	}

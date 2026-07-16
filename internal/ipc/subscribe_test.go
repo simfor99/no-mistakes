@@ -78,6 +78,55 @@ func TestSubscribeContextCancelsDuringHandshake(t *testing.T) {
 	close(release)
 }
 
+func TestSubscribeHandshakeDeadlineKeepsLiveSubscriptionOpen(t *testing.T) {
+	sock := socketPath(t)
+	ln := rawListen(t, sock)
+	defer ln.Close()
+
+	release := make(chan struct{})
+	defer close(release)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		scanner := bufio.NewScanner(conn)
+		if !scanner.Scan() {
+			return
+		}
+		var req ipc.Request
+		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil {
+			return
+		}
+		result, err := json.Marshal(map[string]bool{"ok": true})
+		if err != nil {
+			return
+		}
+		if err := json.NewEncoder(conn).Encode(ipc.Response{JSONRPC: "2.0", ID: req.ID, Result: result}); err != nil {
+			return
+		}
+		<-release
+	}()
+
+	handshakeCtx, cancelHandshake := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelHandshake()
+	events, cancel, err := ipc.SubscribeWithHandshakeContext(handshakeCtx, context.Background(), sock, &ipc.SubscribeParams{RunID: "r1"})
+	if err != nil {
+		t.Fatalf("SubscribeWithHandshakeContext() error = %v", err)
+	}
+	defer cancel()
+
+	<-handshakeCtx.Done()
+	select {
+	case _, ok := <-events:
+		if !ok {
+			t.Fatal("subscription closed after handshake deadline")
+		}
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestSubscribeMalformedEvent(t *testing.T) {
 	sock := socketPath(t)
 	srv := startServer(t, sock)
