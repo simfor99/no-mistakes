@@ -12,8 +12,6 @@ import (
 	"time"
 )
 
-const workerStartGrace = 30 * time.Second
-
 type Phase string
 
 const (
@@ -21,33 +19,27 @@ const (
 	PhaseWatching          Phase = "watching"
 	PhaseHandoffInProgress Phase = "handoff_in_progress"
 	PhaseAwaitingUser      Phase = "awaiting_user"
+	PhaseAwaitingMerge     Phase = "awaiting_merge_result"
+	PhasePaused            Phase = "paused"
 	PhaseCompleted         Phase = "completed"
-	PhaseResumeFailed      Phase = "resume_failed"
 )
 
 type Registration struct {
-	RunID       string `json:"run_id"`
-	RepoID      string `json:"repo_id"`
-	CWD         string `json:"cwd"`
-	SessionID   string `json:"session_id,omitempty"`
-	Phase       Phase  `json:"phase"`
-	Fingerprint string `json:"fingerprint,omitempty"`
-	Error       string `json:"error,omitempty"`
-	UpdatedAt   int64  `json:"updated_at"`
+	RunID                  string `json:"run_id"`
+	RepoID                 string `json:"repo_id"`
+	CWD                    string `json:"cwd"`
+	SessionID              string `json:"session_id,omitempty"`
+	Phase                  Phase  `json:"phase"`
+	Fingerprint            string `json:"fingerprint,omitempty"`
+	LastHandoffTurnID      string `json:"last_handoff_turn_id,omitempty"`
+	LastHandoffFingerprint string `json:"last_handoff_fingerprint,omitempty"`
+	NextHeartbeatAt        int64  `json:"next_heartbeat_at,omitempty"`
+	StaleHeartbeats        int    `json:"stale_heartbeats,omitempty"`
+	Error                  string `json:"error,omitempty"`
+	UpdatedAt              int64  `json:"updated_at"`
 }
 
 type Store struct{ dir string }
-
-type workerLockRecord struct {
-	PID       int       `json:"pid"`
-	StartedAt time.Time `json:"started_at"`
-}
-
-type WorkerLock struct {
-	store *Store
-	file  *os.File
-	runID string
-}
 
 func NewStore(dir string) *Store { return &Store{dir: dir} }
 
@@ -60,20 +52,17 @@ func (s *Store) Arm(reg Registration) (Registration, error) {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return Registration{}, fmt.Errorf("create supervision directory: %w", err)
 	}
-	lock, held, err := s.acquireClaimLock()
+	unlock, err := s.acquireClaimLock()
 	if err != nil {
 		return Registration{}, err
 	}
-	if !held {
-		return Registration{}, fmt.Errorf("supervision registration is busy")
-	}
-	defer lock.Release()
+	defer unlock()
 	regs, err := s.all()
 	if err != nil {
 		return Registration{}, err
 	}
 	for _, existing := range regs {
-		if existing.CWD != reg.CWD || existing.Phase == PhaseCompleted || existing.Phase == PhaseResumeFailed {
+		if existing.CWD != reg.CWD || existing.Phase == PhaseCompleted || existing.Phase == PhasePaused || existing.Phase == PhaseAwaitingMerge {
 			continue
 		}
 		return Registration{}, fmt.Errorf("supervision is already active for this working directory")
@@ -81,6 +70,10 @@ func (s *Store) Arm(reg Registration) (Registration, error) {
 	reg.Phase = PhaseArmed
 	reg.SessionID = ""
 	reg.Fingerprint = ""
+	reg.LastHandoffTurnID = ""
+	reg.LastHandoffFingerprint = ""
+	reg.NextHeartbeatAt = 0
+	reg.StaleHeartbeats = 0
 	reg.Error = ""
 	reg.UpdatedAt = time.Now().UTC().Unix()
 	if err := s.write(reg); err != nil {
@@ -98,14 +91,14 @@ func (s *Store) Claim(cwd, sessionID string) (Registration, bool, error) {
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
 		return Registration{}, false, fmt.Errorf("create supervision directory: %w", err)
 	}
-	lock, held, err := s.acquireClaimLock()
+	unlock, err := s.acquireClaimLock()
+	if os.IsExist(err) {
+		return Registration{}, false, nil
+	}
 	if err != nil {
 		return Registration{}, false, err
 	}
-	if !held {
-		return Registration{}, false, nil
-	}
-	defer lock.Release()
+	defer unlock()
 	regs, err := s.all()
 	if err != nil {
 		return Registration{}, false, err
@@ -149,140 +142,91 @@ func (s *Store) FindByCWD(cwd string) (Registration, bool, error) {
 		return Registration{}, false, err
 	}
 	for _, reg := range regs {
-		if reg.CWD == cwd && reg.Phase != PhaseCompleted && reg.Phase != PhaseResumeFailed {
+		if reg.CWD == cwd && reg.Phase != PhaseCompleted && reg.Phase != PhasePaused && reg.Phase != PhaseAwaitingMerge {
 			return reg, true, nil
 		}
 	}
 	return Registration{}, false, nil
 }
 
-func (s *Store) acquireClaimLock() (*storeLock, bool, error) {
-	return acquireStoreLock(filepath.Join(s.dir, ".claim.lock"))
-}
-
-func (s *Store) AcquireWorker(runID string) (bool, error) {
+// UpdateForSession atomically persists a small supervisor state transition for
+// the registered session. It deliberately does not create a new claim: hooks
+// for unrelated Codex sessions must remain harmless no-ops.
+func (s *Store) UpdateForSession(runID, sessionID string, update func(*Registration)) (Registration, bool, error) {
+	if strings.TrimSpace(runID) == "" || strings.TrimSpace(sessionID) == "" {
+		return Registration{}, false, nil
+	}
 	if err := os.MkdirAll(s.dir, 0o755); err != nil {
-		return false, fmt.Errorf("create supervision directory: %w", err)
+		return Registration{}, false, fmt.Errorf("create supervision directory: %w", err)
 	}
-	lock, held, err := s.acquireClaimLock()
-	if err != nil {
-		return false, err
+	unlock, err := s.acquireClaimLock()
+	if os.IsExist(err) {
+		return Registration{}, false, nil
 	}
-	if !held {
-		return false, nil
-	}
-	defer lock.Release()
-
-	path := s.workerLockPath(runID)
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return s.createWorkerLock(path)
-	} else if err != nil {
-		return false, fmt.Errorf("inspect worker lock: %w", err)
-	}
-
-	worker, active, err := s.tryWorkerLock(runID)
-	if err != nil {
-		return false, err
-	}
-	if !active {
-		return false, nil
-	}
-	_ = unlockStoreFile(worker)
-	_ = worker.Close()
-	if !s.workerLockExpired(path) {
-		return false, nil
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("remove stale worker lock: %w", err)
-	}
-	return s.createWorkerLock(path)
-}
-
-func (s *Store) ReleaseWorker(runID string) error {
-	return s.releaseWorker(runID, nil)
-}
-
-func (s *Store) HoldWorker(runID string) (*WorkerLock, bool, error) {
-	file, active, err := s.tryWorkerLock(runID)
-	if err != nil || !active {
-		return nil, active, err
-	}
-	lock := &WorkerLock{store: s, file: file, runID: runID}
-	record, err := json.Marshal(workerLockRecord{PID: os.Getpid(), StartedAt: time.Now().UTC()})
-	if err != nil {
-		_ = lock.Release()
-		return nil, false, fmt.Errorf("encode worker lock: %w", err)
-	}
-	if err := file.Truncate(0); err != nil {
-		_ = lock.Release()
-		return nil, false, fmt.Errorf("reset worker lock: %w", err)
-	}
-	if _, err := file.WriteAt(record, 0); err != nil {
-		_ = lock.Release()
-		return nil, false, fmt.Errorf("write worker lock: %w", err)
-	}
-	return lock, true, nil
-}
-
-func (l *WorkerLock) Release() error {
-	if l == nil || l.file == nil {
-		return nil
-	}
-	file := l.file
-	l.file = nil
-	return l.store.releaseWorker(l.runID, file)
-}
-
-func (s *Store) releaseWorker(runID string, owned *os.File) error {
-	lock, err := acquireStoreLockWait(filepath.Join(s.dir, ".claim.lock"))
-	if err != nil {
-		return err
-	}
-	defer lock.Release()
-	if owned == nil {
-		var held bool
-		owned, held, err = s.tryWorkerLock(runID)
-		if err != nil || !held {
-			return err
-		}
-	}
-	_ = unlockStoreFile(owned)
-	closeErr := owned.Close()
-	removeErr := os.Remove(s.workerLockPath(runID))
-	if os.IsNotExist(removeErr) {
-		removeErr = nil
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close worker lock: %w", closeErr)
-	}
-	return removeErr
-}
-
-func (s *Store) Handoff(runID, fingerprint string) (Registration, bool, error) {
-	lock, held, err := s.acquireClaimLock()
 	if err != nil {
 		return Registration{}, false, err
 	}
-	if !held {
-		return Registration{}, false, nil
-	}
-	defer lock.Release()
+	defer unlock()
 	reg, found, err := s.Get(runID)
-	if err != nil || !found || reg.Phase != PhaseWatching {
-		return reg, false, err
+	if err != nil || !found || reg.SessionID != sessionID {
+		return Registration{}, false, err
 	}
-	if reg.Fingerprint == fingerprint {
-		reg.Phase = PhaseAwaitingUser
-	} else {
-		reg.Phase = PhaseHandoffInProgress
-		reg.Fingerprint = fingerprint
-	}
-	reg.Error = ""
+	update(&reg)
 	reg.UpdatedAt = time.Now().UTC().Unix()
 	if err := s.write(reg); err != nil {
 		return Registration{}, false, err
 	}
-	return reg, reg.Phase == PhaseHandoffInProgress, nil
+	return reg, true, nil
+}
+
+// PrepareHandoff records the exact Stop-turn/event pair before the hook emits
+// its JSON continuation. This is the idempotency boundary for repeated Stop
+// deliveries; stop_hook_active itself is intentionally not used as a veto.
+func (s *Store) PrepareHandoff(runID, sessionID, turnID, eventFingerprint, progressFingerprint string, phase Phase, nextHeartbeatAt int64, staleHeartbeats int) (Registration, bool, error) {
+	if strings.TrimSpace(turnID) == "" || strings.TrimSpace(eventFingerprint) == "" {
+		return Registration{}, false, nil
+	}
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		return Registration{}, false, fmt.Errorf("create supervision directory: %w", err)
+	}
+	unlock, err := s.acquireClaimLock()
+	if os.IsExist(err) {
+		return Registration{}, false, nil
+	}
+	if err != nil {
+		return Registration{}, false, err
+	}
+	defer unlock()
+	reg, found, err := s.Get(runID)
+	if err != nil || !found || reg.SessionID != sessionID {
+		return Registration{}, false, err
+	}
+	if reg.LastHandoffTurnID == turnID && reg.LastHandoffFingerprint == eventFingerprint {
+		return reg, false, nil
+	}
+	reg.Phase = phase
+	reg.LastHandoffTurnID = turnID
+	reg.LastHandoffFingerprint = eventFingerprint
+	reg.Fingerprint = progressFingerprint
+	reg.NextHeartbeatAt = nextHeartbeatAt
+	reg.StaleHeartbeats = staleHeartbeats
+	reg.UpdatedAt = time.Now().UTC().Unix()
+	if err := s.write(reg); err != nil {
+		return Registration{}, false, err
+	}
+	return reg, true, nil
+}
+
+func (s *Store) acquireClaimLock() (func(), error) {
+	lock, err := os.OpenFile(filepath.Join(s.dir, ".claim.lock"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := lock.Close(); err != nil {
+		_ = os.Remove(lock.Name())
+		return nil, fmt.Errorf("close registration lock: %w", err)
+	}
+	return func() { _ = os.Remove(lock.Name()) }, nil
 }
 
 func (s *Store) Save(reg Registration) error {
@@ -347,46 +291,4 @@ func (s *Store) write(reg Registration) error {
 		return fmt.Errorf("replace registration: %w", err)
 	}
 	return nil
-}
-
-func (s *Store) workerLockPath(runID string) string {
-	return filepath.Join(s.dir, runID+".worker.lock")
-}
-
-func (s *Store) createWorkerLock(path string) (bool, error) {
-	record, err := json.Marshal(workerLockRecord{PID: os.Getpid(), StartedAt: time.Now().UTC()})
-	if err != nil {
-		return false, fmt.Errorf("encode worker lock: %w", err)
-	}
-	if err := os.WriteFile(path, record, 0o600); err != nil {
-		return false, fmt.Errorf("create worker lock: %w", err)
-	}
-	return true, nil
-}
-
-func (s *Store) tryWorkerLock(runID string) (*os.File, bool, error) {
-	file, err := os.OpenFile(s.workerLockPath(runID), os.O_RDWR, 0o600)
-	if os.IsNotExist(err) {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, fmt.Errorf("open worker lock: %w", err)
-	}
-	if err := tryLockStoreFile(file); err != nil {
-		_ = file.Close()
-		return nil, false, nil
-	}
-	return file, true, nil
-}
-
-func (s *Store) workerLockExpired(path string) bool {
-	data, err := os.ReadFile(path)
-	if err == nil {
-		var record workerLockRecord
-		if json.Unmarshal(data, &record) == nil && !record.StartedAt.IsZero() {
-			return time.Since(record.StartedAt) >= workerStartGrace
-		}
-	}
-	info, err := os.Stat(path)
-	return err == nil && time.Since(info.ModTime()) >= workerStartGrace
 }

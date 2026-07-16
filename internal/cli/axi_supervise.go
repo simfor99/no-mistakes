@@ -1,52 +1,59 @@
 package cli
 
 import (
-	"crypto/sha256"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/supervision"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 	toon "github.com/toon-format/toon-go"
 )
 
+const supervisionHeartbeat = 5 * time.Minute
+
+var supervisionNow = time.Now
+
 // codexHookEvent is the stable subset of the official Codex command-hook
 // payload needed to bind an explicitly armed run to the session that ended.
-// Unknown fields remain intentionally ignored for forward compatibility.
+// stop_hook_active is intentionally context only: it is not a blanket veto.
 type codexHookEvent struct {
-	SessionID     string `json:"session_id"`
-	CWD           string `json:"cwd"`
-	HookEventName string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
+	TurnID         string `json:"turn_id"`
+	CWD            string `json:"cwd"`
+	HookEventName  string `json:"hook_event_name"`
+	StopHookActive bool   `json:"stop_hook_active"`
 }
 
-var (
-	superviseResume = resumeCodexSession
-	superviseWatch  = runWatchProcess
-	superviseSteps  = func(d *db.DB, runID string) ([]*db.StepResult, error) { return d.GetStepsByRun(runID) }
-	superviseSpawn  = spawnSupervisorWorker
-	superviseNotify = notifySupervisorUser
+type supervisorOutcome string
+
+const (
+	supervisorNone          supervisorOutcome = ""
+	supervisorAskUser       supervisorOutcome = "ask_user"
+	supervisorTechnicalGate supervisorOutcome = "technical_gate"
+	supervisorChecksPassed  supervisorOutcome = "checks_passed"
+	supervisorTerminal      supervisorOutcome = "terminal"
+	supervisorHeartbeat     supervisorOutcome = "heartbeat"
+	supervisorStale         supervisorOutcome = "stale"
+	supervisorWatchFault    supervisorOutcome = "watch_fault"
 )
 
 func newAxiSuperviseCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "supervise", Short: "Opt-in Codex CLI supervision for one AXI run", SilenceErrors: true, SilenceUsage: true}
 	cmd.AddCommand(newAxiSuperviseArmCmd())
 	cmd.AddCommand(newAxiSuperviseStatusCmd())
-	worker := &cobra.Command{Use: "worker", Hidden: true, Args: cobra.NoArgs, SilenceErrors: true, SilenceUsage: true}
-	var runID string
-	worker.Flags().StringVar(&runID, "run", "", "armed run id")
-	worker.RunE = func(cmd *cobra.Command, args []string) error {
-		return runAxiSuperviseWorker(strings.TrimSpace(runID))
-	}
-	cmd.AddCommand(worker)
 	return cmd
 }
 
@@ -73,12 +80,12 @@ func newAxiSuperviseArmCmd() *cobra.Command {
 func newAxiCodexHookCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:           "codex-hook",
-		Short:         "Codex lifecycle hook adapter for armed supervision",
+		Short:         "Codex Stop-hook adapter for armed supervision",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runAxiCodexHook(cmd.InOrStdin())
+			return runAxiCodexHook(cmd.InOrStdin(), cmd.OutOrStdout())
 		},
 	}
 }
@@ -99,7 +106,11 @@ func runAxiSuperviseArm(cmd *cobra.Command, runID string) error {
 	if run == nil || run.RepoID != env.repo.ID || terminalStatus(string(run.Status)) {
 		return emitError(cmd, 1, fmt.Sprintf("run %q is not an active run for this repository", runID))
 	}
-	cwd, err := supervisorWorktreeRoot()
+	gitRoot, err := git.FindGitRoot(".")
+	if err != nil {
+		return emitError(cmd, 1, "resolve current worktree root")
+	}
+	cwd, err := canonicalSupervisorCWD(gitRoot)
 	if err != nil {
 		return emitError(cmd, 1, err.Error())
 	}
@@ -112,7 +123,8 @@ func runAxiSuperviseArm(cmd *cobra.Command, runID string) error {
 		toonField("run_id", reg.RunID),
 		toonField("cwd", reg.CWD),
 		toonField("hook_required", true),
-		toonField("help", []string{"Install the documented Codex Stop hook before ending this turn; without it, no worker will start."}),
+		toonField("single_session_per_worktree_required", true),
+		toonField("help", []string{"Install the documented Codex Stop hook before ending this turn; it keeps this same turn alive for technical events and pauses for your decisions."}),
 	)
 	return nil
 }
@@ -134,9 +146,10 @@ func runAxiSuperviseStatus(cmd *cobra.Command, runID string) error {
 		return emitError(cmd, 1, "no local supervision is registered for this run")
 	}
 	fields := []toon.Field{
-		toonField("supervision", string(reg.Phase)),
+		toonField("supervision", reg.Phase),
 		toonField("run_id", reg.RunID),
 		toonField("session_bound", reg.SessionID != ""),
+		toonField("stale_heartbeats", reg.StaleHeartbeats),
 		toonField("updated_at", reg.UpdatedAt),
 	}
 	if reg.Error != "" {
@@ -146,16 +159,19 @@ func runAxiSuperviseStatus(cmd *cobra.Command, runID string) error {
 	return nil
 }
 
-func runAxiCodexHook(in io.Reader) error {
+// runAxiCodexHook is intentionally quiet unless it emits the documented Stop
+// continuation object. Hook input and any pipeline text are never mirrored to
+// stdout; the resumed Codex turn reads the bound AXI status itself.
+func runAxiCodexHook(in io.Reader, out io.Writer) error {
 	var event codexHookEvent
 	if err := json.NewDecoder(io.LimitReader(in, 64<<10)).Decode(&event); err != nil {
-		return nil // A global hook must be harmless for non-Codex or malformed input.
+		return nil
 	}
-	if event.HookEventName != "Stop" {
+	if event.HookEventName != "Stop" || strings.TrimSpace(event.SessionID) == "" || strings.TrimSpace(event.TurnID) == "" {
 		return nil
 	}
 	cwd, err := canonicalSupervisorCWD(event.CWD)
-	if err != nil || strings.TrimSpace(event.SessionID) == "" {
+	if err != nil {
 		return nil
 	}
 	p, d, err := openResources()
@@ -176,181 +192,203 @@ func runAxiCodexHook(in io.Reader) error {
 	} else if reg.SessionID != event.SessionID {
 		return nil
 	}
-	run, err := d.GetRun(reg.RunID)
+	if reg.Phase == supervision.PhaseAwaitingMerge || reg.Phase == supervision.PhasePaused || reg.Phase == supervision.PhaseCompleted {
+		return nil
+	}
+	if !supervisionRepoMatches(d, cwd, reg.RepoID) {
+		_, _, _ = store.UpdateForSession(reg.RunID, event.SessionID, func(reg *supervision.Registration) {
+			reg.Phase, reg.Error = supervision.PhasePaused, "repo_binding_mismatch"
+		})
+		return nil
+	}
+
+	outcome, run, err := waitForSupervisorEvent(p, reg)
+	if err != nil {
+		outcome = supervisorWatchFault
+	}
+	if run != nil && run.RepoID != reg.RepoID {
+		_, _, _ = store.UpdateForSession(reg.RunID, event.SessionID, func(reg *supervision.Registration) {
+			reg.Phase, reg.Error = supervision.PhasePaused, "run_repo_mismatch"
+		})
+		return nil
+	}
+	applySupervisorOutcome(store, p, reg, event, outcome, run, out)
+	return nil
+}
+
+func supervisionRepoMatches(d interface {
+	GetRepo(string) (*db.Repo, error)
+	GetRepoByPath(string) (*db.Repo, error)
+}, cwd, repoID string) bool {
+	root, err := git.FindGitRoot(cwd)
+	if err != nil {
+		return false
+	}
+	root, err = canonicalSupervisorCWD(root)
+	if err != nil {
+		return false
+	}
+	repo, err := d.GetRepoByPath(root)
+	if err == nil && repo != nil {
+		return repo.ID == repoID
+	}
+	mainRoot, err := git.FindMainRepoRoot(cwd)
+	if err != nil {
+		return false
+	}
+	mainRoot, err = canonicalSupervisorCWD(mainRoot)
+	if err != nil {
+		return false
+	}
+	repo, err = d.GetRepoByPath(mainRoot)
+	return err == nil && repo != nil && repo.ID == repoID
+}
+
+func waitForSupervisorEvent(p *paths.Paths, reg supervision.Registration) (supervisorOutcome, *ipc.RunInfo, error) {
+	if alive, _ := daemon.IsRunning(p); !alive {
+		return supervisorWatchFault, nil, fmt.Errorf("daemon unavailable")
+	}
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		return supervisorWatchFault, nil, err
+	}
+	defer client.Close()
+	read := func() (*ipc.RunInfo, error) { return getRunInfo(client, reg.RunID) }
+	run, err := read()
 	if err != nil || run == nil {
-		reg.Phase, reg.Error = supervision.PhaseResumeFailed, "registered run is unavailable"
-		_ = store.Save(reg)
-		return nil
+		return supervisorWatchFault, nil, err
 	}
-	if terminalStatus(string(run.Status)) {
-		reg.Phase = supervision.PhaseCompleted
-		_ = store.Save(reg)
-		return nil
+	if outcome := classifySupervisorRun(run, ciLogReader(p)); outcome != supervisorNone {
+		return outcome, run, nil
 	}
-	if run.AwaitingAgentSince != nil {
-		firstUserHandoff := reg.Phase != supervision.PhaseAwaitingUser
-		reg.Phase = supervision.PhaseAwaitingUser
-		_ = store.Save(reg)
-		if firstUserHandoff {
-			superviseNotify("No-Mistakes braucht eine Entscheidung", "Der Run wartet auf deine Antwort in Codex.")
-		}
-		return nil
-	}
-	reg.Phase = supervision.PhaseWatching
-	if err := store.Save(reg); err != nil {
-		return nil
-	}
-	started, err := store.AcquireWorker(reg.RunID)
-	if err != nil || !started {
-		return nil
-	}
-	if err := superviseSpawn(p.Root(), reg.CWD, reg.RunID); err != nil {
-		_ = store.ReleaseWorker(reg.RunID)
-		reg.Phase, reg.Error = supervision.PhaseResumeFailed, "start worker: "+err.Error()
-		_ = store.Save(reg)
-	}
-	return nil
-}
-
-func runAxiSuperviseWorker(runID string) error {
-	if runID == "" {
-		return fmt.Errorf("--run is required")
-	}
-	p, err := paths.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events, unsubscribe, err := ipc.SubscribeContext(ctx, p.Socket(), &ipc.SubscribeParams{RunID: reg.RunID})
 	if err != nil {
-		return err
+		return supervisorWatchFault, run, err
 	}
-	store := supervision.NewStore(p.SupervisionDir())
-	worker, held, err := store.HoldWorker(runID)
-	if err != nil || !held {
-		return err
+	defer unsubscribe()
+	deadline := time.Unix(reg.NextHeartbeatAt, 0)
+	if reg.NextHeartbeatAt == 0 || !deadline.After(supervisionNow()) {
+		deadline = supervisionNow().Add(supervisionHeartbeat)
 	}
-	defer worker.Release()
-	if err := p.EnsureDirs(); err != nil {
-		return recordSupervisorWorkerFailure(store, runID, "open resources: "+err.Error())
-	}
-	d, err := db.Open(p.DB())
-	if err != nil {
-		return recordSupervisorWorkerFailure(store, runID, "open resources: "+err.Error())
-	}
-	defer d.Close()
-	reg, found, err := store.Get(runID)
-	if err != nil || !found || reg.Phase != supervision.PhaseWatching || reg.SessionID == "" {
-		return nil
-	}
-	if err := superviseWatch(p.Root(), reg.CWD, runID); err != nil {
-		run, getErr := d.GetRun(runID)
-		if getErr != nil || run == nil || !terminalStatus(string(run.Status)) {
-			reg.Phase, reg.Error = supervision.PhaseResumeFailed, "watch: "+err.Error()
-			_ = store.Save(reg)
-			return nil
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			run, err := read()
+			if err != nil || run == nil {
+				return supervisorWatchFault, run, err
+			}
+			if outcome := classifySupervisorRun(run, ciLogReader(p)); outcome != supervisorNone {
+				return outcome, run, nil
+			}
+			return supervisorHeartbeat, run, nil
+		case _, ok := <-events:
+			run, err := read()
+			if err != nil || run == nil {
+				return supervisorWatchFault, run, err
+			}
+			if outcome := classifySupervisorRun(run, ciLogReader(p)); outcome != supervisorNone {
+				return outcome, run, nil
+			}
+			if !ok {
+				return supervisorWatchFault, run, fmt.Errorf("event stream closed")
+			}
 		}
 	}
-	run, err := d.GetRun(runID)
-	if err != nil || run == nil {
-		reg.Phase, reg.Error = supervision.PhaseResumeFailed, "registered run is unavailable after watch"
-		return store.Save(reg)
-	}
-	if terminalStatus(string(run.Status)) {
-		reg.Phase = supervision.PhaseCompleted
-		return store.Save(reg)
-	}
-	steps, err := superviseSteps(d, runID)
-	if err != nil {
-		return recordSupervisorWorkerFailure(store, runID, "load watched run steps: "+err.Error())
-	}
-	reg, resume, err := store.Handoff(runID, supervisorFingerprint(run, steps))
-	if err != nil {
-		return err
-	}
-	if !resume {
-		return nil
-	}
-	// Release before resume: the resumed turn's Stop hook must be able to start
-	// the next watch phase after it sends axi respond or asks Simon a question.
-	if err := worker.Release(); err != nil {
-		return err
-	}
-	if err := superviseResume(reg.CWD, reg.SessionID, runID); err != nil {
-		reg.Phase, reg.Error = supervision.PhaseResumeFailed, "resume Codex: "+err.Error()
-		_ = store.Save(reg)
-		superviseNotify("No-Mistakes-Supervisor konnte Codex nicht fortsetzen", "Öffne den AXI-Status für die gespeicherte Diagnose.")
-	}
-	return nil
 }
 
-func runWatchProcess(nmHome, cwd, runID string) error {
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve executable: %w", err)
+func classifySupervisorRun(run *ipc.RunInfo, logs func(string) []string) supervisorOutcome {
+	rv := runViewFromIPC(run)
+	if terminalStatus(rv.Status) {
+		return supervisorTerminal
 	}
-	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err != nil {
-		return fmt.Errorf("open null device: %w", err)
+	if gate, ok := rv.awaitingStep(); ok {
+		findings, err := types.ParseFindingsJSON(gate.FindingsJSON)
+		if err != nil || types.HasAskUserFindings(findings) {
+			return supervisorAskUser
+		}
+		return supervisorTechnicalGate
 	}
-	defer devNull.Close()
-	cmd := exec.Command(exe, "axi", "watch", "--run", runID, "--until", "attention")
-	cmd.Dir = cwd
-	cmd.Env = supervisorEnv(nmHome)
-	cmd.Stdout, cmd.Stderr, cmd.Stdin = devNull, devNull, nil
-	shellenv.ConfigureShellCommand(cmd)
-	if err := shellenv.RunShellCommand(cmd); err != nil {
-		return fmt.Errorf("watch process: %w", err)
+	if ciReadyToMerge(rv, logs(run.ID)) {
+		return supervisorChecksPassed
 	}
-	return nil
+	return supervisorNone
 }
 
-func resumeCodexSession(cwd, sessionID, runID string) error {
-	path, err := exec.LookPath("codex")
-	if err != nil {
-		return fmt.Errorf("find codex: %w", err)
+func applySupervisorOutcome(store *supervision.Store, p *paths.Paths, reg supervision.Registration, event codexHookEvent, outcome supervisorOutcome, run *ipc.RunInfo, out io.Writer) {
+	if outcome == supervisorNone {
+		return
 	}
-	prompt := fmt.Sprintf("No-Mistakes supervision event for run %s. Read `no-mistakes axi status --run %s`, continue only the allowed technical AXI action, and keep Simon's CEO-decision boundary. Do not report this wake as completion.", runID, runID)
-	cmd := exec.Command(path, "exec", "-C", cwd, "resume", sessionID, prompt)
-	cmd.Dir = cwd
-	cmd.Stdin = nil
-	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
-	shellenv.ConfigureShellCommand(cmd)
-	if err := shellenv.RunShellCommand(cmd); err != nil {
-		return err
+	fingerprint := supervisorFingerprint(outcome, run, reg.NextHeartbeatAt)
+	nextHeartbeat := supervisionNow().Add(supervisionHeartbeat).Unix()
+	stale := reg.StaleHeartbeats
+	phase := supervision.PhaseHandoffInProgress
+	reason := ""
+	switch outcome {
+	case supervisorAskUser:
+		_, _, _ = store.UpdateForSession(reg.RunID, event.SessionID, func(reg *supervision.Registration) {
+			reg.Phase, reg.Fingerprint, reg.Error = supervision.PhaseAwaitingUser, supervisorProgressFingerprint(run), ""
+		})
+		return
+	case supervisorTechnicalGate:
+		reason = "nm_event=technical_gate"
+	case supervisorChecksPassed:
+		phase, reason = supervision.PhaseAwaitingMerge, "nm_event=checks_passed"
+	case supervisorTerminal:
+		phase, reason = supervision.PhaseCompleted, "nm_event=terminal"
+	case supervisorWatchFault:
+		phase, reason = supervision.PhasePaused, "nm_event=watch_fault"
+	case supervisorHeartbeat:
+		if reg.Fingerprint == supervisorProgressFingerprint(run) {
+			if stale >= configStaleHeartbeatLimit(p) {
+				phase, reason = supervision.PhasePaused, "nm_event=stale"
+			} else {
+				stale++
+				reason = "nm_event=heartbeat"
+			}
+		} else {
+			stale = 0
+			reason = "nm_event=heartbeat"
+		}
 	}
-	return nil
+	if reason == "" {
+		return
+	}
+	prepared, emit, err := store.PrepareHandoff(reg.RunID, event.SessionID, event.TurnID, fingerprint, supervisorProgressFingerprint(run), phase, nextHeartbeat, stale)
+	if err != nil || !emit || prepared.SessionID != event.SessionID {
+		return
+	}
+	_, _ = io.WriteString(out, `{"decision":"block","reason":"`+reason+`"}`+"\n")
 }
 
-func supervisorWorktreeRoot() (string, error) {
-	root, err := git.FindGitRoot(".")
-	if err != nil {
-		return "", fmt.Errorf("find current worktree root: %w", err)
-	}
-	return canonicalSupervisorCWD(root)
+func supervisorFingerprint(outcome supervisorOutcome, run *ipc.RunInfo, deadline int64) string {
+	return string(outcome) + "|" + supervisorProgressFingerprint(run) + fmt.Sprintf("|%d", deadline)
 }
 
-func recordSupervisorWorkerFailure(store *supervision.Store, runID, message string) error {
-	reg, found, err := store.Get(runID)
-	if err == nil && found {
-		reg.Phase, reg.Error = supervision.PhaseResumeFailed, message
-		_ = store.Save(reg)
+func supervisorProgressFingerprint(run *ipc.RunInfo) string {
+	if run == nil {
+		return "unavailable"
 	}
-	return fmt.Errorf("%s", message)
-}
-
-func supervisorFingerprint(run *db.Run, steps []*db.StepResult) string {
-	var state strings.Builder
-	state.WriteString(string(run.Status))
-	state.WriteByte('|')
-	state.WriteString(fmt.Sprintf("%d|%t", run.UpdatedAt, run.AwaitingAgentSince != nil))
-	for _, step := range steps {
-		state.WriteByte('|')
-		state.WriteString(string(step.StepName))
-		state.WriteByte(':')
-		state.WriteString(string(step.Status))
+	parts := []string{string(run.Status), fmt.Sprintf("%d", run.UpdatedAt), fmt.Sprintf("%t", run.AwaitingAgent)}
+	for _, step := range run.Steps {
+		activity := int64(0)
 		if step.LastActivityAt != nil {
-			state.WriteString(fmt.Sprintf(":%d", *step.LastActivityAt))
+			activity = *step.LastActivityAt
 		}
+		parts = append(parts, string(step.StepName)+":"+string(step.Status)+":"+fmt.Sprintf("%d:%d:%d", step.RoundCount, step.FixRoundCount, activity))
 	}
-	sum := sha256.Sum256([]byte(state.String()))
-	return fmt.Sprintf("%x", sum[:])
+	return strings.Join(parts, "|")
+}
+
+func configStaleHeartbeatLimit(p *paths.Paths) int {
+	cfg, err := config.LoadGlobal(p.ConfigFile())
+	if err != nil {
+		return config.DefaultSupervisionMaxStaleHeartbeats
+	}
+	return cfg.SupervisionMaxStaleHeartbeats
 }
 
 func canonicalSupervisorCWD(value string) (string, error) {
@@ -365,28 +403,10 @@ func canonicalSupervisorCWD(value string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve cwd: %w", err)
 	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
 	return filepath.Clean(abs), nil
 }
 
-func notifySupervisorUser(title, message string) {
-	if path, err := exec.LookPath("notify-send"); err == nil {
-		cmd := exec.Command(path, title, message)
-		cmd.Stdout, cmd.Stderr, cmd.Stdin = io.Discard, io.Discard, nil
-		_ = cmd.Start()
-	}
-}
-
-func supervisorEnv(nmHome string) []string {
-	env := os.Environ()
-	filtered := env[:0]
-	for _, entry := range env {
-		if !strings.HasPrefix(entry, "NM_HOME=") {
-			filtered = append(filtered, entry)
-		}
-	}
-	return append(filtered, "NM_HOME="+nmHome)
-}
-
-// toonField avoids exporting the TOON dependency into this package's command
-// plumbing while keeping arm output consistent with the rest of AXI.
 func toonField(key string, value any) toon.Field { return toon.Field{Key: key, Value: value} }

@@ -2,18 +2,16 @@ package cli
 
 import (
 	"bytes"
-	"context"
-	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/supervision"
 	"github.com/kunchenguid/no-mistakes/internal/types"
-	"github.com/spf13/cobra"
 )
 
 func TestCanonicalSupervisorCWD(t *testing.T) {
@@ -27,376 +25,92 @@ func TestCanonicalSupervisorCWD(t *testing.T) {
 }
 
 func TestCodexHookIgnoresNonStopEvents(t *testing.T) {
-	if err := runAxiCodexHook(strings.NewReader(`{"hook_event_name":"PostToolUse","session_id":"s","cwd":"/tmp"}`)); err != nil {
+	if err := runAxiCodexHook(strings.NewReader(`{"hook_event_name":"PostToolUse","session_id":"s","turn_id":"t","cwd":"/tmp"}`), io.Discard); err != nil {
 		t.Fatalf("runAxiCodexHook() error = %v", err)
 	}
 }
 
 func TestCodexHookIgnoresMalformedPayload(t *testing.T) {
-	if err := runAxiCodexHook(strings.NewReader(`not json`)); err != nil {
+	if err := runAxiCodexHook(strings.NewReader(`not json`), io.Discard); err != nil {
 		t.Fatalf("runAxiCodexHook() error = %v", err)
 	}
 }
 
-func TestCodexHookParksAlreadyAwaitingRunWithoutResuming(t *testing.T) {
-	nmHome := t.TempDir()
-	t.Setenv("NM_HOME", nmHome)
-	p := paths.WithRoot(nmHome)
-	if err := p.EnsureDirs(); err != nil {
-		t.Fatalf("EnsureDirs() error = %v", err)
-	}
-	database, err := db.Open(p.DB())
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer database.Close()
-	repo, err := database.InsertRepoWithID("repo-1", t.TempDir(), "origin", "main")
-	if err != nil {
-		t.Fatalf("insert repo: %v", err)
-	}
-	dbRun, err := database.InsertRun(repo.ID, "feature/parked", "head", "base")
-	if err != nil {
-		t.Fatalf("insert run: %v", err)
-	}
-	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
-		t.Fatalf("mark run running: %v", err)
-	}
-	if err := database.SetRunAwaitingAgent(dbRun.ID); err != nil {
-		t.Fatalf("park run: %v", err)
-	}
-	cwd := t.TempDir()
-	store := supervision.NewStore(p.SupervisionDir())
-	if _, err := store.Arm(supervision.Registration{RunID: dbRun.ID, RepoID: repo.ID, CWD: cwd}); err != nil {
-		t.Fatalf("Arm() error = %v", err)
-	}
-
-	previousSpawn, previousNotify := superviseSpawn, superviseNotify
-	t.Cleanup(func() {
-		superviseSpawn = previousSpawn
-		superviseNotify = previousNotify
-	})
-	spawned, notified := 0, 0
-	superviseSpawn = func(string, string, string) error {
-		spawned++
-		return nil
-	}
-	superviseNotify = func(string, string) { notified++ }
-	event := `{"hook_event_name":"Stop","session_id":"session-1","cwd":"` + cwd + `"}`
-	if err := runAxiCodexHook(strings.NewReader(event)); err != nil {
-		t.Fatalf("runAxiCodexHook() error = %v", err)
-	}
-	reg, found, err := store.Get(dbRun.ID)
-	if err != nil || !found || reg.Phase != supervision.PhaseAwaitingUser || reg.SessionID != "session-1" {
-		t.Fatalf("Get() after parked stop = (%+v, %v, %v), want awaiting bound session", reg, found, err)
-	}
-	if spawned != 0 || notified != 1 {
-		t.Fatalf("parked stop spawned=%d notified=%d, want 0 and 1", spawned, notified)
-	}
-	if _, err := os.Stat(filepath.Join(p.SupervisionDir(), dbRun.ID+".worker.lock")); !os.IsNotExist(err) {
-		t.Fatalf("parked stop created worker marker: %v", err)
-	}
-
-	if err := database.ClearRunAwaitingAgent(dbRun.ID); err != nil {
-		t.Fatalf("clear parked run: %v", err)
-	}
-	if err := runAxiCodexHook(strings.NewReader(event)); err != nil {
-		t.Fatalf("runAxiCodexHook() after response error = %v", err)
-	}
-	if spawned != 1 {
-		t.Fatalf("later stop spawned=%d, want 1", spawned)
-	}
-	reg, found, err = store.Get(dbRun.ID)
-	if err != nil || !found || reg.Phase != supervision.PhaseWatching {
-		t.Fatalf("Get() after response = (%+v, %v, %v), want watching", reg, found, err)
-	}
-	if err := store.ReleaseWorker(dbRun.ID); err != nil {
-		t.Fatalf("release fake worker claim: %v", err)
-	}
-}
-
-func TestSupervisorEnvReplacesExistingNMHome(t *testing.T) {
-	t.Setenv("NM_HOME", "/old")
-	env := supervisorEnv("/new")
-	count := 0
-	for _, entry := range env {
-		if strings.HasPrefix(entry, "NM_HOME=") {
-			count++
-			if entry != "NM_HOME=/new" {
-				t.Fatalf("NM_HOME entry = %q, want replacement", entry)
-			}
-		}
-	}
-	if count != 1 {
-		t.Fatalf("NM_HOME count = %d, want 1", count)
-	}
-}
-
-func TestAxiSuperviseArmBindsLinkedWorktree(t *testing.T) {
-	main := setupTestRepo(t)
-	linked := filepath.Join(t.TempDir(), "linked")
-	run(t, main, "git", "worktree", "add", "-b", "feature/linked", linked)
-	linkedRoot, err := filepath.EvalSymlinks(linked)
-	if err != nil {
-		linkedRoot = linked
-	}
-	mainRoot, err := filepath.EvalSymlinks(main)
-	if err != nil {
-		mainRoot = main
-	}
-	chdir(t, linkedRoot)
-
-	p, err := paths.New()
-	if err != nil {
-		t.Fatalf("paths.New() error = %v", err)
-	}
-	if err := p.EnsureDirs(); err != nil {
-		t.Fatalf("EnsureDirs() error = %v", err)
-	}
-	database, err := db.Open(p.DB())
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer database.Close()
-	repo, err := database.InsertRepoWithID("repo-1", mainRoot, "origin", "main")
-	if err != nil {
-		t.Fatalf("insert repo: %v", err)
-	}
-	dbRun, err := database.InsertRun(repo.ID, "feature/linked", "head", "base")
-	if err != nil {
-		t.Fatalf("insert run: %v", err)
-	}
-	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
-		t.Fatalf("mark run running: %v", err)
-	}
-
-	cmd := &cobra.Command{}
-	cmd.SetContext(context.Background())
-	cmd.SetOut(new(bytes.Buffer))
-	if err := runAxiSuperviseArm(cmd, dbRun.ID); err != nil {
-		t.Fatalf("runAxiSuperviseArm() error = %v", err)
-	}
-	reg, found, err := supervision.NewStore(p.SupervisionDir()).Get(dbRun.ID)
-	if err != nil || !found {
-		t.Fatalf("Get() = (%+v, %v, %v), want registration", reg, found, err)
-	}
-	if reg.CWD != linkedRoot {
-		t.Fatalf("armed cwd = %q, want linked worktree %q", reg.CWD, linkedRoot)
-	}
-}
-
-func TestAxiSuperviseCommandsPersistOnlyLocalRegistration(t *testing.T) {
-	repoDir := setupTestRepo(t)
-	p, err := paths.New()
-	if err != nil {
-		t.Fatalf("paths.New() error = %v", err)
-	}
-	if err := p.EnsureDirs(); err != nil {
-		t.Fatalf("EnsureDirs() error = %v", err)
-	}
-	database, err := db.Open(p.DB())
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer database.Close()
-	repo, err := database.InsertRepoWithID("repo-supervise", repoDir, "origin", "main")
-	if err != nil {
-		t.Fatalf("insert repo: %v", err)
-	}
-	run, err := database.InsertRun(repo.ID, "feature/supervise", "head", "base")
-	if err != nil {
-		t.Fatalf("insert run: %v", err)
-	}
-	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
-		t.Fatalf("mark run running: %v", err)
-	}
-
-	armed, err := executeCmd("axi", "supervise", "arm", "--run", run.ID)
-	if err != nil {
-		t.Fatalf("axi supervise arm error = %v", err)
-	}
-	for _, want := range []string{
-		"supervision: armed",
-		"run_id: \"" + run.ID + "\"",
-		"hook_required: true",
-		"without it, no worker will start",
+func TestClassifySupervisorRunFailsClosedForAskUserAndMalformedGates(t *testing.T) {
+	findings := `{"findings":[{"id":"decision","action":"ask-user"}]}`
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{name: "ask user", raw: findings},
+		{name: "malformed", raw: `{`},
+		{name: "missing action", raw: `{"findings":[{"id":"unknown"}]}`},
 	} {
-		if !strings.Contains(armed, want) {
-			t.Errorf("axi supervise arm output missing %q in:\n%s", want, armed)
-		}
-	}
-
-	status, err := executeCmd("axi", "supervise", "status", "--run", run.ID)
-	if err != nil {
-		t.Fatalf("axi supervise status error = %v", err)
-	}
-	for _, want := range []string{"supervision: armed", "session_bound: false"} {
-		if !strings.Contains(status, want) {
-			t.Errorf("axi supervise status output missing %q in:\n%s", want, status)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".codex", "hooks.json")); !os.IsNotExist(err) {
-		t.Fatalf("axi supervise arm wrote a global Codex hook: %v", err)
-	}
-	t.Logf("end-user axi supervise transcript:\n%s%s", armed, status)
-}
-
-func TestAxiSuperviseWorkerReleasesClaimAfterResourceFailure(t *testing.T) {
-	nmHome := t.TempDir()
-	t.Setenv("NM_HOME", nmHome)
-	p := paths.WithRoot(nmHome)
-	if err := p.EnsureDirs(); err != nil {
-		t.Fatalf("EnsureDirs() error = %v", err)
-	}
-	store := supervision.NewStore(p.SupervisionDir())
-	reg, err := store.Arm(supervision.Registration{RunID: "run-1", RepoID: "repo-1", CWD: t.TempDir()})
-	if err != nil {
-		t.Fatalf("Arm() error = %v", err)
-	}
-	reg, claimed, err := store.Claim(reg.CWD, "session-1")
-	if err != nil || !claimed {
-		t.Fatalf("Claim() = (%+v, %v, %v), want claimed registration", reg, claimed, err)
-	}
-	if got, err := store.AcquireWorker(reg.RunID); err != nil || !got {
-		t.Fatalf("AcquireWorker() = (%v, %v), want (true, nil)", got, err)
-	}
-	if err := os.Mkdir(p.DB(), 0o755); err != nil {
-		t.Fatalf("create database blocker: %v", err)
-	}
-	if err := runAxiSuperviseWorker(reg.RunID); err == nil {
-		t.Fatal("runAxiSuperviseWorker() error = nil, want resource failure")
-	}
-	if got, err := store.AcquireWorker(reg.RunID); err != nil || !got {
-		t.Fatalf("AcquireWorker() after resource failure = (%v, %v), want released lock", got, err)
-	}
-	updated, found, err := store.Get(reg.RunID)
-	if err != nil || !found || updated.Phase != supervision.PhaseResumeFailed {
-		t.Fatalf("Get() after resource failure = (%+v, %v, %v), want visible failure", updated, found, err)
+		t.Run(tc.name, func(t *testing.T) {
+			raw := tc.raw
+			run := &ipc.RunInfo{ID: "run", Status: types.RunRunning, AwaitingAgent: true, Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: types.StepStatusAwaitingApproval, FindingsJSON: &raw}}}
+			if got := classifySupervisorRun(run, func(string) []string { return nil }); got != supervisorAskUser {
+				t.Fatalf("classifySupervisorRun() = %q, want %q", got, supervisorAskUser)
+			}
+		})
 	}
 }
 
-func TestAxiSuperviseWorkerDoesNotResumeUnchangedEventTwice(t *testing.T) {
-	nmHome := t.TempDir()
-	t.Setenv("NM_HOME", nmHome)
-	p := paths.WithRoot(nmHome)
-	if err := p.EnsureDirs(); err != nil {
-		t.Fatalf("EnsureDirs() error = %v", err)
+func TestClassifySupervisorRunRecognizesTechnicalGateAndTerminal(t *testing.T) {
+	technical := `{"findings":[{"id":"fix","action":"auto-fix"}]}`
+	run := &ipc.RunInfo{ID: "run", Status: types.RunRunning, AwaitingAgent: true, Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: types.StepStatusAwaitingApproval, FindingsJSON: &technical}}}
+	if got := classifySupervisorRun(run, func(string) []string { return nil }); got != supervisorTechnicalGate {
+		t.Fatalf("technical gate = %q, want %q", got, supervisorTechnicalGate)
 	}
-	database, err := db.Open(p.DB())
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer database.Close()
-	repo, err := database.InsertRepoWithID("repo-1", t.TempDir(), "origin", "main")
-	if err != nil {
-		t.Fatalf("insert repo: %v", err)
-	}
-	dbRun, err := database.InsertRun(repo.ID, "feature/supervise", "head", "base")
-	if err != nil {
-		t.Fatalf("insert run: %v", err)
-	}
-	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
-		t.Fatalf("mark run running: %v", err)
-	}
-	store := supervision.NewStore(p.SupervisionDir())
-	reg, err := store.Arm(supervision.Registration{RunID: dbRun.ID, RepoID: repo.ID, CWD: t.TempDir()})
-	if err != nil {
-		t.Fatalf("Arm() error = %v", err)
-	}
-	reg, claimed, err := store.Claim(reg.CWD, "session-1")
-	if err != nil || !claimed {
-		t.Fatalf("Claim() = (%+v, %v, %v), want claimed registration", reg, claimed, err)
-	}
-
-	previousWatch, previousResume := superviseWatch, superviseResume
-	t.Cleanup(func() {
-		superviseWatch = previousWatch
-		superviseResume = previousResume
-	})
-	superviseWatch = func(string, string, string) error { return nil }
-	resumes := 0
-	superviseResume = func(string, string, string) error {
-		resumes++
-		return nil
-	}
-
-	if got, err := store.AcquireWorker(dbRun.ID); err != nil || !got {
-		t.Fatalf("AcquireWorker() = (%v, %v), want (true, nil)", got, err)
-	}
-	if err := runAxiSuperviseWorker(dbRun.ID); err != nil {
-		t.Fatalf("first runAxiSuperviseWorker() error = %v", err)
-	}
-	reg, found, err := store.Get(dbRun.ID)
-	if err != nil || !found {
-		t.Fatalf("Get() after first worker = (%+v, %v, %v), want registration", reg, found, err)
-	}
-	reg.Phase = supervision.PhaseWatching
-	if err := store.Save(reg); err != nil {
-		t.Fatalf("restore watching state: %v", err)
-	}
-	if got, err := store.AcquireWorker(dbRun.ID); err != nil || !got {
-		t.Fatalf("AcquireWorker() for unchanged event = (%v, %v), want (true, nil)", got, err)
-	}
-	if err := runAxiSuperviseWorker(dbRun.ID); err != nil {
-		t.Fatalf("second runAxiSuperviseWorker() error = %v", err)
-	}
-	if resumes != 1 {
-		t.Fatalf("resume count = %d, want 1 for an unchanged event", resumes)
-	}
-	reg, found, err = store.Get(dbRun.ID)
-	if err != nil || !found || reg.Phase != supervision.PhaseAwaitingUser {
-		t.Fatalf("Get() after unchanged event = (%+v, %v, %v), want awaiting user", reg, found, err)
+	run.Status = types.RunCompleted
+	if got := classifySupervisorRun(run, func(string) []string { return nil }); got != supervisorTerminal {
+		t.Fatalf("terminal = %q, want %q", got, supervisorTerminal)
 	}
 }
 
-func TestAxiSuperviseWorkerRecordsStepReadFailure(t *testing.T) {
-	nmHome := t.TempDir()
-	t.Setenv("NM_HOME", nmHome)
-	p := paths.WithRoot(nmHome)
-	if err := p.EnsureDirs(); err != nil {
-		t.Fatalf("EnsureDirs() error = %v", err)
-	}
-	database, err := db.Open(p.DB())
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	defer database.Close()
-	repo, err := database.InsertRepoWithID("repo-1", t.TempDir(), "origin", "main")
-	if err != nil {
-		t.Fatalf("insert repo: %v", err)
-	}
-	dbRun, err := database.InsertRun(repo.ID, "feature/supervise", "head", "base")
-	if err != nil {
-		t.Fatalf("insert run: %v", err)
-	}
-	if err := database.UpdateRunStatus(dbRun.ID, types.RunRunning); err != nil {
-		t.Fatalf("mark run running: %v", err)
-	}
-	store := supervision.NewStore(p.SupervisionDir())
-	reg, err := store.Arm(supervision.Registration{RunID: dbRun.ID, RepoID: repo.ID, CWD: t.TempDir()})
-	if err != nil {
-		t.Fatalf("Arm() error = %v", err)
-	}
-	reg, claimed, err := store.Claim(reg.CWD, "session-1")
-	if err != nil || !claimed {
-		t.Fatalf("Claim() = (%+v, %v, %v), want claimed registration", reg, claimed, err)
-	}
-
-	previousWatch, previousSteps := superviseWatch, superviseSteps
-	t.Cleanup(func() {
-		superviseWatch = previousWatch
-		superviseSteps = previousSteps
-	})
-	superviseWatch = func(string, string, string) error { return nil }
-	superviseSteps = func(*db.DB, string) ([]*db.StepResult, error) { return nil, errors.New("step read unavailable") }
-
-	if got, err := store.AcquireWorker(dbRun.ID); err != nil || !got {
-		t.Fatalf("AcquireWorker() = (%v, %v), want (true, nil)", got, err)
-	}
-	if err := runAxiSuperviseWorker(dbRun.ID); err == nil {
-		t.Fatal("runAxiSuperviseWorker() error = nil, want step read failure")
-	}
-	updated, found, err := store.Get(dbRun.ID)
-	if err != nil || !found || updated.Phase != supervision.PhaseResumeFailed || !strings.Contains(updated.Error, "step read unavailable") {
-		t.Fatalf("Get() after step read failure = (%+v, %v, %v), want visible failure", updated, found, err)
+func TestApplySupervisorOutcomeBoundsReasonsAndPausesAfterStaleBudget(t *testing.T) {
+	for _, budget := range []int{1, 4, 6} {
+		t.Run("budget-"+string(rune('0'+budget)), func(t *testing.T) {
+			nmHome := t.TempDir()
+			p := paths.WithRoot(nmHome)
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(nmHome, "config.yaml"), []byte("supervision_max_stale_heartbeats: "+string(rune('0'+budget))+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			store := supervision.NewStore(p.SupervisionDir())
+			if _, err := store.Arm(supervision.Registration{RunID: "run", RepoID: "repo", CWD: "/work"}); err != nil {
+				t.Fatal(err)
+			}
+			reg, ok, err := store.Claim("/work", "session")
+			if err != nil || !ok {
+				t.Fatalf("Claim() = (%+v, %v, %v)", reg, ok, err)
+			}
+			run := &ipc.RunInfo{ID: "run", RepoID: "repo", Status: types.RunRunning, UpdatedAt: 7}
+			reg.Fingerprint = supervisorProgressFingerprint(run)
+			if err := store.Save(reg); err != nil {
+				t.Fatal(err)
+			}
+			for i := 1; i <= budget+1; i++ {
+				reg, ok, err = store.Get("run")
+				if err != nil || !ok {
+					t.Fatalf("Get() = (%+v, %v, %v)", reg, ok, err)
+				}
+				var out bytes.Buffer
+				applySupervisorOutcome(store, p, reg, codexHookEvent{SessionID: "session", TurnID: "turn-" + string(rune('0'+i))}, supervisorHeartbeat, run, &out)
+				want := `{"decision":"block","reason":"nm_event=heartbeat"}` + "\n"
+				if i == budget+1 {
+					want = `{"decision":"block","reason":"nm_event=stale"}` + "\n"
+				}
+				if got := out.String(); got != want {
+					t.Fatalf("heartbeat %d output = %q, want %q", i, got, want)
+				}
+			}
+			reg, ok, err = store.Get("run")
+			if err != nil || !ok || reg.Phase != supervision.PhasePaused {
+				t.Fatalf("final registration = (%+v, %v, %v), want paused", reg, ok, err)
+			}
+		})
 	}
 }

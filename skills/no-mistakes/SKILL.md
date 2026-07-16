@@ -110,8 +110,13 @@ Run the pipeline and decide on its findings as they come up:
    opt-in supervisor instead: after the run ID is known, run
    `no-mistakes axi supervise arm --run <id>` and only when Simon has
    installed and trusted the documented Codex `Stop` hook. That hook may
-   resume this same session for a new AXI event; without it, never promise that
-   a background command or a closed turn will wake Codex automatically.
+   keep this same session alive for a technical AXI event or a five-minute
+   heartbeat. It never starts another Codex process, never answers a user gate,
+   and pauses after the configured stale-heartbeat budget. During one supervised
+   chain use only one Codex session for that worktree. Before using it, verify
+   the installed hook timeout is at least 360 seconds. Without the reviewed,
+   opt-in hook, never promise that a background command or a closed turn will
+   wake Codex automatically.
    Use `--until terminal` only when this agent deliberately wants to ignore
    intermediate attention.
    When that status output includes `awaiting_agent: parked <duration>` under the run,
