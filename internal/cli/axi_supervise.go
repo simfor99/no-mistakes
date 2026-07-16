@@ -504,7 +504,11 @@ func canonicalSupervisorCWD(value string) (string, error) {
 	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = resolved
 	}
-	return filepath.Clean(abs), nil
+	root, err := git.FindGitRoot(abs)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(root), nil
 }
 
 func toonField(key string, value any) toon.Field { return toon.Field{Key: key, Value: value} }

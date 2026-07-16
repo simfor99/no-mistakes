@@ -131,9 +131,16 @@ func TestStorePrepareHandoffDeduplicatesTurn(t *testing.T) {
 	if first.LastHandoffTurnID != "turn-1" || first.LastHandoffFingerprint != "heartbeat-1" {
 		t.Fatalf("first handoff fields = %+v", first)
 	}
+	second, emitted, err := store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-2", "progress-2", PhaseHandoffInProgress, 124, 2)
+	if err != nil || !emitted {
+		t.Fatalf("different event PrepareHandoff() = (%+v, %v, %v), want emitted handoff", second, emitted, err)
+	}
+	if second.LastHandoffFingerprint != "heartbeat-2" {
+		t.Fatalf("different event fingerprint = %q, want heartbeat-2", second.LastHandoffFingerprint)
+	}
 	_, emitted, err = store.PrepareHandoff("run-1", "session-1", "turn-1", "heartbeat-2", "progress-2", PhaseHandoffInProgress, 124, 2)
 	if err != nil || emitted {
-		t.Fatalf("duplicate PrepareHandoff() emitted=%v err=%v, want false nil", emitted, err)
+		t.Fatalf("duplicate event PrepareHandoff() emitted=%v err=%v, want false nil", emitted, err)
 	}
 	_, emitted, err = store.PrepareHandoff("run-1", "session-1", "turn-2", "heartbeat-1", "progress-1", PhaseHandoffInProgress, 124, 2)
 	if err != nil || !emitted {

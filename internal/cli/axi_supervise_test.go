@@ -26,6 +26,26 @@ func TestCanonicalSupervisorCWD(t *testing.T) {
 	}
 }
 
+func TestCanonicalSupervisorCWDNormalizesSubdirectoryToGitRoot(t *testing.T) {
+	repoDir := setupTestRepo(t)
+	subdir := filepath.Join(repoDir, "nested", "working-directory")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := canonicalSupervisorCWD(subdir)
+	if err != nil {
+		t.Fatalf("canonicalSupervisorCWD() error = %v", err)
+	}
+	want, err := canonicalSupervisorCWD(repoDir)
+	if err != nil {
+		t.Fatalf("canonicalSupervisorCWD(repo root) error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("canonicalSupervisorCWD(subdirectory) = %q, want git root %q", got, want)
+	}
+}
+
 func TestSupervisionBranchMatchesCurrentWorktree(t *testing.T) {
 	repoDir := setupTestRepo(t)
 	run(t, repoDir, "git", "checkout", "-b", "feature/current")

@@ -235,7 +235,7 @@ func (s *Store) PrepareHandoff(runID, sessionID, turnID, eventFingerprint, progr
 	if err != nil || !found || reg.SessionID != sessionID {
 		return Registration{}, false, err
 	}
-	if reg.LastHandoffTurnID == turnID {
+	if reg.LastHandoffTurnID == turnID && reg.LastHandoffFingerprint == eventFingerprint {
 		return reg, false, nil
 	}
 	reg.Phase = phase
