@@ -41,10 +41,37 @@ func TestOpenCreatesSchema(t *testing.T) {
 	if !hasColumn(t, d, "repos", "fork_url") {
 		t.Fatal("repos.fork_url column missing from fresh schema")
 	}
+	if !hasColumn(t, d, "runs", "gate_ref_head_sha") {
+		t.Fatal("runs.gate_ref_head_sha column missing from fresh schema")
+	}
 	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid"} {
 		if !hasColumn(t, d, "step_results", column) {
 			t.Fatalf("step_results.%s column missing from fresh schema", column)
 		}
+	}
+}
+
+func TestOpenMigratesRunGateRefHeadColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN gate_ref_head_sha`); err != nil {
+		d.Close()
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { migrated.Close() })
+	if !hasColumn(t, migrated, "runs", "gate_ref_head_sha") {
+		t.Fatal("runs.gate_ref_head_sha column missing after migration")
 	}
 }
 

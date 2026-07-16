@@ -323,12 +323,22 @@ func TestUpdateRunHeadSHA(t *testing.T) {
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
 
+	if err := d.UpdateRunHeadWithGateRef(run.ID, "rebased", "abc"); err != nil {
+		t.Fatalf("update head with gate ref: %v", err)
+	}
+	withGateRef, _ := d.GetRun(run.ID)
+	if withGateRef.GateRefHeadSHA == nil || *withGateRef.GateRefHeadSHA != "abc" {
+		t.Fatalf("gate ref head = %v, want %q", withGateRef.GateRefHeadSHA, "abc")
+	}
 	if err := d.UpdateRunHeadSHA(run.ID, "xyz"); err != nil {
 		t.Fatalf("update head sha: %v", err)
 	}
 	got, _ := d.GetRun(run.ID)
 	if got.HeadSHA != "xyz" {
 		t.Errorf("head sha = %q, want %q", got.HeadSHA, "xyz")
+	}
+	if got.GateRefHeadSHA != nil {
+		t.Errorf("gate ref head = %v, want nil", got.GateRefHeadSHA)
 	}
 }
 

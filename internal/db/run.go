@@ -10,14 +10,15 @@ import (
 
 // Run represents a pipeline run.
 type Run struct {
-	ID      string
-	RepoID  string
-	Branch  string
-	HeadSHA string
-	BaseSHA string
-	Status  types.RunStatus
-	PRURL   *string
-	Error   *string
+	ID             string
+	RepoID         string
+	Branch         string
+	HeadSHA        string
+	BaseSHA        string
+	GateRefHeadSHA *string
+	Status         types.RunStatus
+	PRURL          *string
+	Error          *string
 	// AwaitingAgentSince is the unix-seconds timestamp at which the run parked
 	// at a gate awaiting the driving agent's response (an awaiting_approval or
 	// fix_review step). It is nil whenever the run is not parked: the executor
@@ -37,13 +38,13 @@ type Run struct {
 	UpdatedAt       int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, gate_ref_head_sha, status, pr_url, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
 	return row.Scan(
-		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.Status,
+		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.GateRefHeadSHA, &r.Status,
 		&r.PRURL, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.CreatedAt, &r.UpdatedAt,
@@ -196,9 +197,17 @@ func (d *DB) UpdateRunPRURL(id, prURL string) error {
 
 // UpdateRunHeadSHA updates the run head SHA and timestamp.
 func (d *DB) UpdateRunHeadSHA(id, headSHA string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, now(), id)
+	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, gate_ref_head_sha = NULL, updated_at = ? WHERE id = ?`, headSHA, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run head sha: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) UpdateRunHeadWithGateRef(id, headSHA, gateRefHeadSHA string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, gate_ref_head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, gateRefHeadSHA, now(), id)
+	if err != nil {
+		return fmt.Errorf("update run head with gate ref: %w", err)
 	}
 	return nil
 }

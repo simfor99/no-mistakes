@@ -21,25 +21,6 @@ type HousekeepingLintResult struct {
 type RunShared struct {
 	mu               sync.Mutex
 	housekeepingLint *HousekeepingLintResult
-	branchRefHead    string
-}
-
-func (s *RunShared) SetBranchRefHead(headSHA string) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.branchRefHead = headSHA
-}
-
-func (s *RunShared) BranchRefHead() string {
-	if s == nil {
-		return ""
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.branchRefHead
 }
 
 // SetHousekeepingLint records the combined pass's lint assessment for the

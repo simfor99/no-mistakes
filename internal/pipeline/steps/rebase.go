@@ -504,11 +504,11 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
 		previousHead := sctx.Run.HeadSHA
-		sctx.Run.HeadSHA = headSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
+		if err := sctx.DB.UpdateRunHeadWithGateRef(sctx.Run.ID, headSHA, previousHead); err != nil {
 			return nil, err
 		}
-		sctx.Shared.SetBranchRefHead(previousHead)
+		sctx.Run.HeadSHA = headSHA
+		sctx.Run.GateRefHeadSHA = &previousHead
 		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
 	}
 

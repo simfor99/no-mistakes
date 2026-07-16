@@ -12,7 +12,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -94,7 +93,7 @@ func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	}
 }
 
-func TestUpdateHeadSHA_KeepsDetachedRebaseRefUntilNextCommit(t *testing.T) {
+func TestUpdateHeadSHA_PersistsDetachedRebaseRefForResume(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "main")
@@ -111,7 +110,6 @@ func TestUpdateHeadSHA_KeepsDetachedRebaseRefUntilNextCommit(t *testing.T) {
 	}
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Shared = &pipeline.RunShared{}
 	if _, err := updateHeadSHA(context.Background(), sctx); err != nil {
 		t.Fatal(err)
 	}
@@ -128,14 +126,23 @@ func TestUpdateHeadSHA_KeepsDetachedRebaseRefUntilNextCommit(t *testing.T) {
 	if stored.HeadSHA != rebasedHead {
 		t.Fatalf("stored head = %s, want %s", stored.HeadSHA, rebasedHead)
 	}
+	if stored.GateRefHeadSHA == nil || *stored.GateRefHeadSHA != headSHA {
+		t.Fatalf("stored gate ref head = %v, want %s", stored.GateRefHeadSHA, headSHA)
+	}
+	resumed := *sctx
+	resumed.Run = stored
+	resumed.Shared = nil
 	if err := os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := commitAgentFixes(sctx, types.StepReview, "apply fix", "fallback"); err != nil {
+	if err := commitAgentFixes(&resumed, types.StepReview, "apply fix", "fallback"); err != nil {
 		t.Fatal(err)
 	}
-	if branchHead := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); branchHead != sctx.Run.HeadSHA {
-		t.Fatalf("branch head = %s, want %s", branchHead, sctx.Run.HeadSHA)
+	if branchHead := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); branchHead != resumed.Run.HeadSHA {
+		t.Fatalf("branch head = %s, want %s", branchHead, resumed.Run.HeadSHA)
+	}
+	if resumed.Run.GateRefHeadSHA != nil {
+		t.Fatalf("resumed gate ref head = %v, want nil", resumed.Run.GateRefHeadSHA)
 	}
 }
 
