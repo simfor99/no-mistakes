@@ -108,7 +108,7 @@ const (
 )
 
 func newAxiSuperviseCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "supervise", Short: "Opt-in Codex CLI supervision for one AXI run", SilenceErrors: true, SilenceUsage: true}
+	cmd := &cobra.Command{Use: "supervise", Short: "Opt-in Codex or Claude Code supervision for one AXI run", SilenceErrors: true, SilenceUsage: true}
 	cmd.AddCommand(newAxiSuperviseArmCmd())
 	cmd.AddCommand(newAxiSuperviseStatusCmd())
 	return cmd
