@@ -310,4 +310,11 @@ func TestCallContextCancelsBlockedRead(t *testing.T) {
 		t.Fatal("CallContext did not return after cancellation")
 	}
 	close(release)
+
+	// A canceled read may leave a response in flight. The client must discard
+	// that connection so a following call cannot consume the stale response.
+	var response json.RawMessage
+	if err := c.Call("block", nil, &response); err == nil {
+		t.Fatal("Call() succeeded after a canceled read; want closed connection")
+	}
 }

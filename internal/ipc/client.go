@@ -139,6 +139,7 @@ func (c *Client) call(ctx context.Context, method string, params interface{}, re
 	}
 
 	if err := c.encoder.Encode(req); err != nil {
+		_ = c.conn.Close()
 		return fmt.Errorf("send request: %w", err)
 	}
 
@@ -163,6 +164,7 @@ func (c *Client) call(ctx context.Context, method string, params interface{}, re
 	}()
 
 	if !c.scanner.Scan() {
+		_ = c.conn.Close()
 		if err := ctx.Err(); err != nil {
 			return err
 		}
