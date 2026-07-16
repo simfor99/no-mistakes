@@ -50,28 +50,31 @@ func hasPendingChecks(checks []scm.Check) bool {
 	return false
 }
 
-// queuedPendingChecks returns the stable names and oldest known creation time
-// only when every pending check is explicitly queued. A provider's generic
-// "pending" state is not enough: it may represent useful work in progress.
-func queuedPendingChecks(checks []scm.Check) (names string, oldest time.Time, allQueued bool) {
+// queuedPendingChecks returns display names, a stable queued-instance fingerprint,
+// and the oldest known creation time only when every pending check is explicitly queued.
+// A provider's generic "pending" state is not enough: it may represent useful work in progress.
+func queuedPendingChecks(checks []scm.Check) (names, signature string, oldest time.Time, allQueued bool) {
 	queued := make([]string, 0)
+	instances := make([]string, 0)
 	for _, check := range checks {
 		if !check.Pending() {
 			continue
 		}
 		if !check.Queued() {
-			return "", time.Time{}, false
+			return "", "", time.Time{}, false
 		}
 		queued = append(queued, check.Name)
+		instances = append(instances, fmt.Sprintf("%q@%s", check.Name, check.CreatedAt.UTC().Format(time.RFC3339Nano)))
 		if !check.CreatedAt.IsZero() && (oldest.IsZero() || check.CreatedAt.Before(oldest)) {
 			oldest = check.CreatedAt
 		}
 	}
 	if len(queued) == 0 {
-		return "", time.Time{}, false
+		return "", "", time.Time{}, false
 	}
 	sort.Strings(queued)
-	return strings.Join(queued, ", "), oldest, true
+	sort.Strings(instances)
+	return strings.Join(queued, ", "), strings.Join(instances, ","), oldest, true
 }
 
 // failingCheckNames returns the names of failing checks.

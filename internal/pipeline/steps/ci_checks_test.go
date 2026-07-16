@@ -30,7 +30,7 @@ func TestQueuedPendingChecksRequiresEveryPendingCheckToBeExplicitlyQueued(t *tes
 		{Name: "claude", Bucket: scm.CheckBucketPending, Progress: scm.CheckProgressQueued, CreatedAt: queuedAt.Add(time.Minute)},
 		{Name: "unit", Bucket: scm.CheckBucketPass},
 	}
-	names, oldest, ok := queuedPendingChecks(checks)
+	names, signature, oldest, ok := queuedPendingChecks(checks)
 	if !ok {
 		t.Fatal("explicitly queued pending checks should be eligible for the attention guard")
 	}
@@ -40,10 +40,38 @@ func TestQueuedPendingChecksRequiresEveryPendingCheckToBeExplicitlyQueued(t *tes
 	if !oldest.Equal(queuedAt) {
 		t.Fatalf("oldest queued time = %v, want %v", oldest, queuedAt)
 	}
+	if signature == "" {
+		t.Fatal("queued checks should have an instance fingerprint")
+	}
 
 	checks[1].Progress = scm.CheckProgressRunning
-	if _, _, ok := queuedPendingChecks(checks); ok {
+	if _, _, _, ok := queuedPendingChecks(checks); ok {
 		t.Fatal("an in-progress check must keep the monitor waiting instead of raising the queued-only guard")
+	}
+}
+
+func TestQueuedPendingChecksFingerprintResetsWhenOneQueuedRunIsReplaced(t *testing.T) {
+	t.Parallel()
+	queuedAt := time.Date(2026, time.July, 16, 8, 44, 0, 0, time.UTC)
+	checks := []scm.Check{
+		{Name: "build", Bucket: scm.CheckBucketPending, Progress: scm.CheckProgressQueued, CreatedAt: queuedAt},
+		{Name: "test", Bucket: scm.CheckBucketPending, Progress: scm.CheckProgressQueued, CreatedAt: queuedAt.Add(time.Minute)},
+	}
+
+	_, before, oldestBefore, ok := queuedPendingChecks(checks)
+	if !ok {
+		t.Fatal("queued checks should be eligible for the attention guard")
+	}
+	checks[1].CreatedAt = queuedAt.Add(10 * time.Minute)
+	_, after, oldestAfter, ok := queuedPendingChecks(checks)
+	if !ok {
+		t.Fatal("replacement queued check should remain eligible for the attention guard")
+	}
+	if before == after {
+		t.Fatal("replacing a queued run must change its fingerprint")
+	}
+	if !oldestBefore.Equal(oldestAfter) {
+		t.Fatalf("oldest queued time changed from %v to %v", oldestBefore, oldestAfter)
 	}
 }
 

@@ -218,7 +218,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	headReconciled := false
 	queuedChecksSince := time.Time{}
 	queuedChecksSignature := ""
-	queuedChecksCreatedAt := time.Time{}
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		if len(timeoutFailingChecks) > 0 || timeoutMergeConflict {
@@ -339,11 +338,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
 			} else {
 				pending := hasPendingChecks(checks)
-				queuedNames, queuedCreatedAt, onlyQueued := queuedPendingChecks(checks)
+				queuedNames, queuedSignature, queuedCreatedAt, onlyQueued := queuedPendingChecks(checks)
 				if onlyQueued {
-					if queuedChecksSignature != queuedNames || !queuedChecksCreatedAt.Equal(queuedCreatedAt) {
-						queuedChecksSignature = queuedNames
-						queuedChecksCreatedAt = queuedCreatedAt
+					if queuedChecksSignature != queuedSignature {
+						queuedChecksSignature = queuedSignature
 						queuedChecksSince = now()
 						if !queuedCreatedAt.IsZero() && queuedCreatedAt.Before(queuedChecksSince) {
 							queuedChecksSince = queuedCreatedAt
@@ -356,7 +354,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				} else {
 					queuedChecksSince = time.Time{}
 					queuedChecksSignature = ""
-					queuedChecksCreatedAt = time.Time{}
 				}
 				failing := failingCheckNames(checks)
 				sort.Strings(failing)

@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -718,7 +717,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			cancelStep()
 		}
 		sctx.Ctx = ctx
-		if err != nil && reviewGuard != nil && ctx.Err() == nil && stepCtx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		if err != nil && reviewGuard != nil && ctx.Err() == nil && stepCtx.Err() != nil {
 			if reason, stopped := reviewGuard.StopReason(time.Now()); stopped {
 				now := time.Now()
 				writeLog(fmt.Sprintf("review progress guard stopped autonomous work: %s", reason))

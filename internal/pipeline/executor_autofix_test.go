@@ -128,6 +128,35 @@ func TestExecutor_ReviewProgressGuardPreservesGenuineAgentError(t *testing.T) {
 	}
 }
 
+func TestExecutor_ReviewProgressGuardParksNativeProcessExitOnTimeout(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	cfg := &config.Config{
+		ReviewNoProgressTimeout: time.Second,
+		ReviewMaxDuration:       20 * time.Millisecond,
+	}
+
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			<-sctx.Ctx.Done()
+			return nil, errors.New("native agent process exited")
+		},
+	}
+
+	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatalf("abort parked guard: %v", err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("expected aborted guarded run to return an error")
+	}
+}
+
 func TestExecutor_PersistsEffectiveAutoFixLimit(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
