@@ -471,8 +471,9 @@ func parseGitHubTime(value string) time.Time {
 }
 
 type githubRequiredCheck struct {
-	context string
-	appID   *int64
+	context         string
+	appID           *int64
+	provenanceKnown bool
 }
 
 type githubRequiredChecks []githubRequiredCheck
@@ -487,17 +488,17 @@ func githubAppID(value int64) *int64 {
 	return &value
 }
 
-func (checks githubRequiredChecks) add(context string, appID *int64) githubRequiredChecks {
+func (checks githubRequiredChecks) add(context string, appID *int64, provenanceKnown bool) githubRequiredChecks {
 	context = strings.TrimSpace(context)
 	if context == "" {
 		return checks
 	}
 	for _, check := range checks {
-		if check.context == context && sameGitHubAppID(check.appID, appID) {
+		if check.context == context && check.provenanceKnown == provenanceKnown && sameGitHubAppID(check.appID, appID) {
 			return checks
 		}
 	}
-	return append(checks, githubRequiredCheck{context: context, appID: appID})
+	return append(checks, githubRequiredCheck{context: context, appID: appID, provenanceKnown: provenanceKnown})
 }
 
 func sameGitHubAppID(left, right *int64) bool {
@@ -509,7 +510,7 @@ func sameGitHubAppID(left, right *int64) bool {
 
 func (checks githubRequiredChecks) allowsLegacy(context string) bool {
 	for _, check := range checks {
-		if check.context == context && (check.appID == nil || *check.appID == -1) {
+		if check.context == context && check.provenanceKnown && (check.appID == nil || *check.appID == -1) {
 			return true
 		}
 	}
@@ -517,6 +518,9 @@ func (checks githubRequiredChecks) allowsLegacy(context string) bool {
 }
 
 func (check githubRequiredCheck) observedBy(observed []githubCheckIdentity) bool {
+	if !check.provenanceKnown {
+		return false
+	}
 	for _, candidate := range observed {
 		if candidate.name != check.context {
 			continue
@@ -545,11 +549,20 @@ func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) 
 			return nil, false
 		}
 	} else {
-		for _, context := range protection.Contexts {
-			required = required.add(context, nil)
-		}
+		checksByContext := make(map[string]struct{}, len(protection.Checks))
 		for _, check := range protection.Checks {
-			required = required.add(check.Context, check.AppID)
+			context := strings.TrimSpace(check.Context)
+			if context == "" {
+				continue
+			}
+			checksByContext[context] = struct{}{}
+			required = required.add(context, check.AppID, check.AppID != nil)
+		}
+		for _, context := range protection.Contexts {
+			context = strings.TrimSpace(context)
+			if _, explicit := checksByContext[context]; !explicit {
+				required = required.add(context, nil, false)
+			}
 		}
 	}
 
@@ -574,7 +587,7 @@ func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) 
 				continue
 			}
 			for _, check := range rule.Parameters.RequiredStatusChecks {
-				required = required.add(check.Context, check.IntegrationID)
+				required = required.add(check.Context, check.IntegrationID, true)
 			}
 		}
 	}

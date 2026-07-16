@@ -242,9 +242,13 @@ func TestGetChecksMarksOnlyUnprotectedLinklessLegacyPendingAsAdvisory(t *testing
 
 func TestGetChecksKeepsProtectedOrLinkedLegacyPendingBlocking(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct{ name, protection, targetURL string }{
-		{"protected", `{"contexts":["CodeRabbit"]}`, ""},
-		{"linked", `{"contexts":[]}`, "https://example.test/review"},
+	for _, tc := range []struct {
+		name, protection, targetURL string
+		wantChecks                  int
+		wantLegacyBlocking          bool
+	}{
+		{"protected", `{"contexts":["CodeRabbit"]}`, "", 2, false},
+		{"linked", `{"contexts":[]}`, "https://example.test/review", 1, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host := New(githubTestCmdFactory(map[string]githubTestResponse{
@@ -257,7 +261,7 @@ func TestGetChecksKeepsProtectedOrLinkedLegacyPendingBlocking(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(checks) != 1 || !checks[0].BlocksPending || !checks[0].Pending() {
+			if len(checks) != tc.wantChecks || checks[0].BlocksPending != tc.wantLegacyBlocking || !checks[len(checks)-1].Pending() {
 				t.Fatalf("checks = %+v, want blocking legacy pending", checks)
 			}
 		})
@@ -403,6 +407,42 @@ func TestGetChecksKeepsLegacyPendingAdvisoryWhenAnAppSpecificCheckPasses(t *test
 	}
 	if len(checks) != 2 || checks[1].Source != scm.CheckSourceLegacy || checks[1].BlocksPending || checks[1].Pending() {
 		t.Fatalf("checks = %+v, want advisory legacy pending status", checks)
+	}
+}
+
+func TestGetChecksUsesExplicitProtectionCheckInsteadOfMatchingContext(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/branches/main/protection/required_status_checks": {stdout: `{"contexts":["quality"],"checks":[{"context":"quality","app_id":17}]}` + "\n"},
+		"gh api --paginate repos/test/repo/rules/branches/main":                  {stdout: "[]\n"},
+		"gh api --paginate repos/test/repo/commits/abc/check-runs?per_page=100":  {stdout: `{"check_runs":[{"name":"quality","status":"completed","conclusion":"success","app":{"id":17}}]}` + "\n"},
+		"gh api --paginate repos/test/repo/commits/abc/statuses?per_page=100":    {stdout: `[{"context":"quality","state":"pending","target_url":null}]` + "\n"},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{HeadSHA: "abc", BaseBranch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 2 || checks[1].Source != scm.CheckSourceLegacy || checks[1].BlocksPending || checks[1].Pending() {
+		t.Fatalf("checks = %+v, want explicit app check and advisory legacy status", checks)
+	}
+}
+
+func TestGetChecksFailsClosedForProtectionContextWithoutProviderIdentity(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/branches/main/protection/required_status_checks": {stdout: `{"contexts":["quality"]}` + "\n"},
+		"gh api --paginate repos/test/repo/rules/branches/main":                  {stdout: "[]\n"},
+		"gh api --paginate repos/test/repo/commits/abc/check-runs?per_page=100":  {stdout: `{"check_runs":[{"name":"quality","status":"completed","conclusion":"success","app":{"id":17}}]}` + "\n"},
+		"gh api --paginate repos/test/repo/commits/abc/statuses?per_page=100":    {stdout: "[]\n"},
+	}), nil, "", "test/repo")
+
+	checks, err := host.GetChecks(context.Background(), &scm.PR{HeadSHA: "abc", BaseBranch: "main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 2 || checks[1].Name != "quality" || !checks[1].BlocksPending || !checks[1].Pending() {
+		t.Fatalf("checks = %+v, want unresolved-provenance pending check", checks)
 	}
 }
 
