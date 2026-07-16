@@ -116,6 +116,13 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	}
 	status, _ := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
 	if strings.TrimSpace(status) == "" {
+		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
+		if err != nil {
+			return fmt.Errorf("resolve head after %s agent changes: %w", stepName, err)
+		}
+		if err := updateRunHeadSHA(sctx, headSHA); err != nil {
+			return err
+		}
 		sctx.Log("no agent changes to commit")
 		return nil
 	}
@@ -136,15 +143,25 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return err
 	}
+	if err := updateRunHeadSHA(sctx, headSHA); err != nil {
+		return err
+	}
+	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
+	return nil
+}
+
+func updateRunHeadSHA(sctx *pipeline.StepContext, headSHA string) error {
+	if headSHA == sctx.Run.HeadSHA {
+		return nil
+	}
 	ref := normalizedBranchRef(sctx.Run.Branch)
-	if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, headSHA); err != nil {
+	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "update-ref", ref, headSHA); err != nil {
 		return fmt.Errorf("update local branch ref: %w", err)
 	}
 	sctx.Run.HeadSHA = headSHA
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
 		return err
 	}
-	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
 	return nil
 }
 

@@ -143,6 +143,53 @@ func TestReviewStep_FixMode_NoCommitParksForHumanReview(t *testing.T) {
 	}
 }
 
+func TestReviewStep_FixMode_AgentCommitRereviewsForwardHead(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	callCount := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			callCount++
+			if callCount == 1 {
+				if err := os.WriteFile(filepath.Join(dir, "agent-fix.txt"), []byte("fixed\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, dir, "add", "agent-fix.txt")
+				gitCmd(t, dir, "commit", "-m", "agent review fix")
+				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+			}
+			findings, err := json.Marshal(Findings{Summary: "clean"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &agent.Result{Output: findings}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"warning","description":"same issue","action":"auto-fix"}]}`
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("expected rereview of agent commit, got findings %s", outcome.Findings)
+	}
+	if callCount != 2 {
+		t.Fatalf("expected fixer and rereview calls, got %d", callCount)
+	}
+	if liveHead := gitCmd(t, dir, "rev-parse", "HEAD"); sctx.Run.HeadSHA != liveHead {
+		t.Fatalf("run head = %s, want agent commit %s", sctx.Run.HeadSHA, liveHead)
+	}
+	if branchHead := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); branchHead != sctx.Run.HeadSHA {
+		t.Fatalf("branch head = %s, want %s", branchHead, sctx.Run.HeadSHA)
+	}
+}
+
 // The review fixer must apply every fix first, then run one focused
 // verification of the changed area, and must NOT re-run the whole repository
 // test/lint suite in the fix round. A forensic audit measured the old
