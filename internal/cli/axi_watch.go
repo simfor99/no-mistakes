@@ -46,44 +46,43 @@ func newAxiWatchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&untilValue, "until", "", "attention (default) | terminal")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		return trackReadSurface("axi-watch", telemetry.Fields{"until": strings.TrimSpace(untilValue)}, func() (string, string, error) {
-			err := runAxiWatch(cmd, strings.TrimSpace(runID), untilValue)
-			return strings.TrimSpace(untilValue), "", err
+			return runAxiWatch(cmd, strings.TrimSpace(runID), untilValue)
 		})
 	}
 	return cmd
 }
 
-func runAxiWatch(cmd *cobra.Command, runID, untilValue string) error {
+func runAxiWatch(cmd *cobra.Command, runID, untilValue string) (string, string, error) {
 	if runID == "" {
-		return emitError(cmd, 2, "--run is required", "Run `no-mistakes axi watch --run <id> --until attention|terminal`")
+		return "invalid-run", "", emitError(cmd, 2, "--run is required", "Run `no-mistakes axi watch --run <id> --until attention|terminal`")
 	}
 	until, err := parseWatchUntil(untilValue)
 	if err != nil {
-		return emitError(cmd, 2, err.Error())
+		return "invalid-until", "", emitError(cmd, 2, err.Error())
 	}
 	p, d, err := openResources()
 	if err != nil {
-		return emitError(cmd, 1, err.Error())
+		return watchErrorFingerprint(until, "resources-error"), "", emitError(cmd, 1, err.Error())
 	}
 	defer d.Close()
 	dbRun, err := d.GetRun(runID)
 	if err != nil {
-		return emitError(cmd, 1, fmt.Sprintf("get run: %v", err))
+		return watchErrorFingerprint(until, "read-error"), "", emitError(cmd, 1, fmt.Sprintf("get run: %v", err))
 	}
 	if dbRun == nil {
-		return emitError(cmd, 1, fmt.Sprintf("run %q not found", runID))
+		return watchErrorFingerprint(until, "not-found"), "", emitError(cmd, 1, fmt.Sprintf("run %q not found", runID))
 	}
 	steps, _ := d.GetStepsByRun(runID)
 	initial := runViewFromDB(dbRun, steps)
 	if terminalStatus(initial.Status) {
-		return renderWatchResult(cmd, initial, "terminal")
+		return watchResultFingerprint(until, initial, "terminal"), "", renderWatchResult(cmd, initial, "terminal")
 	}
 	if alive, _ := daemon.IsRunning(p); !alive {
-		return emitError(cmd, 1, "daemon is not running; watch did not start it")
+		return watchErrorFingerprint(until, "daemon-unavailable"), "", emitError(cmd, 1, "daemon is not running; watch did not start it")
 	}
 	client, err := ipc.Dial(p.Socket())
 	if err != nil {
-		return emitError(cmd, 1, fmt.Sprintf("connect to daemon: %v", err))
+		return watchErrorFingerprint(until, "connect-error"), "", emitError(cmd, 1, fmt.Sprintf("connect to daemon: %v", err))
 	}
 	defer client.Close()
 	cfg, err := config.LoadGlobal(p.ConfigFile())
@@ -94,30 +93,32 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) error {
 	defer stop()
 	read := func() (*ipc.RunInfo, error) { return getRunInfo(client, runID) }
 	if run, err := read(); err != nil {
-		return emitError(cmd, 1, fmt.Sprintf("read run: %v", err))
+		return watchErrorFingerprint(until, "read-error"), "", emitError(cmd, 1, fmt.Sprintf("read run: %v", err))
 	} else if done, reason := watchReason(run, cfg.StepQuietWarning, ciLogReader(p)); done && until == watchUntilAttention {
-		return renderWatchResult(cmd, runViewFromIPC(run), reason)
+		rv := runViewFromIPC(run)
+		return watchResultFingerprint(until, rv, reason), "", renderWatchResult(cmd, rv, reason)
 	}
 	events, cancel, err := ipc.SubscribeContext(ctx, p.Socket(), &ipc.SubscribeParams{RunID: runID})
 	if err != nil {
 		if ctx.Err() != nil {
-			return renderWatchInterrupted(cmd)
+			return watchErrorFingerprint(until, "interrupted"), "", renderWatchInterrupted(cmd)
 		}
-		return emitError(cmd, 1, fmt.Sprintf("subscribe run: %v", err))
+		return watchErrorFingerprint(until, "subscribe-error"), "", emitError(cmd, 1, fmt.Sprintf("subscribe run: %v", err))
 	}
 	defer cancel()
 	quietLatched := false
 	for {
 		run, err := read()
 		if err != nil {
-			return emitError(cmd, 1, fmt.Sprintf("read run: %v", err))
+			return watchErrorFingerprint(until, "read-error"), "", emitError(cmd, 1, fmt.Sprintf("read run: %v", err))
 		}
 		if done, reason := watchReason(run, cfg.StepQuietWarning, ciLogReader(p)); done {
+			rv := runViewFromIPC(run)
 			if reason == "terminal" {
-				return renderWatchResult(cmd, runViewFromIPC(run), reason)
+				return watchResultFingerprint(until, rv, reason), "", renderWatchResult(cmd, rv, reason)
 			}
 			if until == watchUntilAttention {
-				return renderWatchResult(cmd, runViewFromIPC(run), reason)
+				return watchResultFingerprint(until, rv, reason), "", renderWatchResult(cmd, rv, reason)
 			}
 			if reason == "quiet" {
 				quietLatched = true
@@ -131,22 +132,31 @@ func runAxiWatch(cmd *cobra.Command, runID, untilValue string) error {
 		}
 		select {
 		case <-ctx.Done():
-			return renderWatchInterrupted(cmd)
+			return watchErrorFingerprint(until, "interrupted"), "", renderWatchInterrupted(cmd)
 		case _, ok := <-events:
 			if !ok {
 				final, e := read()
 				if e != nil {
-					return emitError(cmd, 1, fmt.Sprintf("reconcile closed stream: %v", e))
+					return watchErrorFingerprint(until, "reconcile-error"), "", emitError(cmd, 1, fmt.Sprintf("reconcile closed stream: %v", e))
 				}
+				rv := runViewFromIPC(final)
 				if terminalStatus(string(final.Status)) {
-					return renderWatchResult(cmd, runViewFromIPC(final), "terminal")
+					return watchResultFingerprint(until, rv, "terminal"), "", renderWatchResult(cmd, rv, "terminal")
 				}
-				return renderWatchInterruptedStream(cmd, runViewFromIPC(final))
+				return watchResultFingerprint(until, rv, "stream-interrupted"), "", renderWatchInterruptedStream(cmd, rv)
 			}
 			quietLatched = false
 		case <-timer:
 		}
 	}
+}
+
+func watchResultFingerprint(until watchUntil, rv runView, reason string) string {
+	return string(until) + "|" + reason + "|" + runStateFingerprint(rv)
+}
+
+func watchErrorFingerprint(until watchUntil, outcome string) string {
+	return string(until) + "|" + outcome
 }
 
 func watchReason(run *ipc.RunInfo, quiet time.Duration, logs func(string) []string) (bool, string) {

@@ -61,6 +61,21 @@ func TestWatchQuietDelayUsesNearestActiveStep(t *testing.T) {
 	}
 }
 
+func TestWatchResultFingerprintIncludesStopOutcomeAndRunState(t *testing.T) {
+	rv := runView{ID: "run-1", Branch: "feature/watch", Status: "running", Steps: []stepView{{Name: "ci", Status: "running"}}}
+	baseline := watchResultFingerprint(watchUntilAttention, rv, "quiet")
+	if changed := watchResultFingerprint(watchUntilAttention, rv, "checks-passed"); changed == baseline {
+		t.Fatal("changing the watch stop outcome must change the telemetry fingerprint")
+	}
+	rv.Steps[0].Status = "completed"
+	if changed := watchResultFingerprint(watchUntilAttention, rv, "quiet"); changed == baseline {
+		t.Fatal("changing the watched run state must change the telemetry fingerprint")
+	}
+	if changed := watchResultFingerprint(watchUntilTerminal, rv, "quiet"); changed == baseline {
+		t.Fatal("changing the watch mode must change the telemetry fingerprint")
+	}
+}
+
 func TestRenderWatchResultBoundsGateFindings(t *testing.T) {
 	items := make([]types.Finding, maxWatchFindings+1)
 	for i := range items {

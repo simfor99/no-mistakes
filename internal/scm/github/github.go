@@ -319,6 +319,9 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 			Status      string `json:"status"`
 			Conclusion  string `json:"conclusion"`
 			CompletedAt string `json:"completed_at"`
+			App         *struct {
+				ID int64 `json:"id"`
+			} `json:"app"`
 		} `json:"check_runs"`
 	}
 	if err := h.apiJSONPages(ctx, "repos/"+repo+"/commits/"+pr.HeadSHA+"/check-runs?per_page=100", &nativePages); err != nil {
@@ -336,6 +339,7 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 	}
 
 	checks := make([]scm.Check, 0)
+	observed := make([]githubCheckIdentity, 0)
 	for _, native := range nativePages {
 		for _, run := range native.CheckRuns {
 			bucket := normalizeCheckBucket("", run.Status)
@@ -349,6 +353,11 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 				Name: run.Name, Bucket: bucket,
 				CompletedAt: parseGitHubTime(run.CompletedAt), Source: scm.CheckSourceNative, BlocksPending: true,
 			})
+			identity := githubCheckIdentity{name: run.Name, source: scm.CheckSourceNative}
+			if run.App != nil {
+				identity.appID = githubAppID(run.App.ID)
+			}
+			observed = append(observed, identity)
 		}
 	}
 	seen := map[string]bool{}
@@ -360,13 +369,24 @@ func (h *Host) getChecksWithProvenance(ctx context.Context, pr *scm.PR) ([]scm.C
 			seen[status.Context] = true // GitHub returns latest statuses first.
 			bucket := normalizeCheckBucket("", status.State)
 			blocksPending := true
-			if bucket == scm.CheckBucketPending && policyKnown && status.TargetURL == "" && !required[status.Context] {
+			if bucket == scm.CheckBucketPending && policyKnown && status.TargetURL == "" && !required.allowsLegacy(status.Context) {
 				blocksPending = false
 			}
 			checks = append(checks, scm.Check{
 				Name: status.Context, Bucket: bucket, CompletedAt: parseGitHubTime(status.CreatedAt),
 				Source: scm.CheckSourceLegacy, BlocksPending: blocksPending,
 			})
+			observed = append(observed, githubCheckIdentity{name: status.Context, source: scm.CheckSourceLegacy})
+		}
+	}
+	if policyKnown {
+		for _, requirement := range required {
+			if !requirement.observedBy(observed) {
+				checks = append(checks, scm.Check{
+					Name: requirement.context, Bucket: scm.CheckBucketPending,
+					Source: scm.CheckSourceUnknown, BlocksPending: true,
+				})
+			}
 		}
 	}
 	if !policyKnown {
@@ -450,12 +470,74 @@ func parseGitHubTime(value string) time.Time {
 	return parsed
 }
 
-func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) (map[string]bool, bool) {
-	required := map[string]bool{}
+type githubRequiredCheck struct {
+	context string
+	appID   *int64
+}
+
+type githubRequiredChecks []githubRequiredCheck
+
+type githubCheckIdentity struct {
+	name   string
+	appID  *int64
+	source scm.CheckSource
+}
+
+func githubAppID(value int64) *int64 {
+	return &value
+}
+
+func (checks githubRequiredChecks) add(context string, appID *int64) githubRequiredChecks {
+	context = strings.TrimSpace(context)
+	if context == "" {
+		return checks
+	}
+	for _, check := range checks {
+		if check.context == context && sameGitHubAppID(check.appID, appID) {
+			return checks
+		}
+	}
+	return append(checks, githubRequiredCheck{context: context, appID: appID})
+}
+
+func sameGitHubAppID(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
+
+func (checks githubRequiredChecks) allowsLegacy(context string) bool {
+	for _, check := range checks {
+		if check.context == context && (check.appID == nil || *check.appID == -1) {
+			return true
+		}
+	}
+	return false
+}
+
+func (check githubRequiredCheck) observedBy(observed []githubCheckIdentity) bool {
+	for _, candidate := range observed {
+		if candidate.name != check.context {
+			continue
+		}
+		if check.appID == nil || *check.appID == -1 {
+			return true
+		}
+		if candidate.source == scm.CheckSourceNative && candidate.appID != nil && *candidate.appID == *check.appID {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) (githubRequiredChecks, bool) {
+	var required githubRequiredChecks
 	var protection struct {
 		Contexts []string `json:"contexts"`
 		Checks   []struct {
 			Context string `json:"context"`
+			AppID   *int64 `json:"app_id"`
 		} `json:"checks"`
 	}
 	if err := h.apiJSON(ctx, "repos/"+repo+"/branches/"+branch+"/protection/required_status_checks", &protection); err != nil {
@@ -464,12 +546,10 @@ func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) 
 		}
 	} else {
 		for _, context := range protection.Contexts {
-			required[context] = true
+			required = required.add(context, nil)
 		}
 		for _, check := range protection.Checks {
-			if check.Context != "" {
-				required[check.Context] = true
-			}
+			required = required.add(check.Context, check.AppID)
 		}
 	}
 
@@ -477,7 +557,8 @@ func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) 
 		Type       string `json:"type"`
 		Parameters struct {
 			RequiredStatusChecks []struct {
-				Context string `json:"context"`
+				Context       string `json:"context"`
+				IntegrationID *int64 `json:"integration_id"`
 			} `json:"required_status_checks"`
 		} `json:"parameters"`
 	}
@@ -493,9 +574,7 @@ func (h *Host) requiredStatusContexts(ctx context.Context, repo, branch string) 
 				continue
 			}
 			for _, check := range rule.Parameters.RequiredStatusChecks {
-				if check.Context != "" {
-					required[check.Context] = true
-				}
+				required = required.add(check.Context, check.IntegrationID)
 			}
 		}
 	}
