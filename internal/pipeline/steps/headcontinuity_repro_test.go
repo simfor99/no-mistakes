@@ -199,6 +199,65 @@ func TestCommitAgentFixes_AllowsForwardAgentCommit(t *testing.T) {
 	}
 }
 
+func TestUpdateRunHeadSHA_RefusesDivergentCandidate(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", baseSHA)
+	if err := os.WriteFile(filepath.Join(dir, "divergent.txt"), []byte("divergent\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "divergent.txt")
+	gitCmd(t, dir, "commit", "-m", "divergent candidate")
+	divergent := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
+	err := updateRunHeadSHA(sctx, divergent)
+	if err == nil {
+		t.Fatal("expected divergent candidate to be refused")
+	}
+	if !strings.Contains(err.Error(), "not a descendant") {
+		t.Fatalf("expected descendant refusal, got: %v", err)
+	}
+	if sctx.Run.HeadSHA != headSHA {
+		t.Fatalf("run head changed to %s; expected %s", sctx.Run.HeadSHA, headSHA)
+	}
+	if branchHead := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); branchHead != headSHA {
+		t.Fatalf("branch head changed to %s; expected %s", branchHead, headSHA)
+	}
+}
+
+func TestUpdateRunHeadSHA_RefusesUnexpectedBranchRef(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	if err := os.WriteFile(filepath.Join(dir, "agent.txt"), []byte("agent commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "agent.txt")
+	gitCmd(t, dir, "commit", "-m", "agent forward commit")
+	candidate := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	gitCmd(t, dir, "checkout", "-b", "alternate", headSHA)
+	if err := os.WriteFile(filepath.Join(dir, "alternate.txt"), []byte("alternate commit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "alternate.txt")
+	gitCmd(t, dir, "commit", "-m", "alternate forward commit")
+	alternate := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "update-ref", "refs/heads/feature", alternate)
+	gitCmd(t, dir, "checkout", "--detach", candidate)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
+	err := updateRunHeadSHA(sctx, candidate)
+	if err == nil {
+		t.Fatal("expected unexpected branch ref to be refused")
+	}
+	if sctx.Run.HeadSHA != headSHA {
+		t.Fatalf("run head changed to %s; expected %s", sctx.Run.HeadSHA, headSHA)
+	}
+	if branchHead := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); branchHead != alternate {
+		t.Fatalf("branch head changed to %s; expected %s", branchHead, alternate)
+	}
+}
+
 // TestAssertPipelineHeadContinuity_AnchorIsRecordedReviewedHead directly
 // exercises the guard (captain requirement b): it anchors on the recorded
 // reviewed head (sctx.Run.HeadSHA), NOT on the mutable worktree, and an

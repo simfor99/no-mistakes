@@ -151,11 +151,22 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 }
 
 func updateRunHeadSHA(sctx *pipeline.StepContext, headSHA string) error {
-	if headSHA == sctx.Run.HeadSHA {
+	recordedHead := strings.TrimSpace(sctx.Run.HeadSHA)
+	headSHA = strings.TrimSpace(headSHA)
+	if recordedHead == "" {
+		return fmt.Errorf("refusing to record %s head: pipeline recorded head is empty", sctx.Run.Branch)
+	}
+	if headSHA == "" {
+		return fmt.Errorf("refusing to record empty %s head", sctx.Run.Branch)
+	}
+	if headSHA == recordedHead {
 		return nil
 	}
+	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", recordedHead, headSHA); err != nil {
+		return fmt.Errorf("refusing to record %s head %s: it is not a descendant of the pipeline's recorded head %s", sctx.Run.Branch, headSHA, recordedHead)
+	}
 	ref := normalizedBranchRef(sctx.Run.Branch)
-	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "update-ref", ref, headSHA); err != nil {
+	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "update-ref", ref, headSHA, recordedHead); err != nil {
 		return fmt.Errorf("update local branch ref: %w", err)
 	}
 	sctx.Run.HeadSHA = headSHA
