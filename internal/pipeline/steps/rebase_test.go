@@ -92,6 +92,41 @@ func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	}
 }
 
+func TestUpdateHeadSHA_SyncsDetachedRebaseBranchRef(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(dir, "main-update.txt"), []byte("main update\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "main-update.txt")
+	gitCmd(t, dir, "commit", "-m", "advance main")
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	gitCmd(t, dir, "rebase", "main")
+	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if rebasedHead == headSHA {
+		t.Fatal("expected rebase to rewrite the feature head")
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	if _, err := updateHeadSHA(context.Background(), sctx); err != nil {
+		t.Fatal(err)
+	}
+	if sctx.Run.HeadSHA != rebasedHead {
+		t.Fatalf("run head = %s, want %s", sctx.Run.HeadSHA, rebasedHead)
+	}
+	if branchHead := gitCmd(t, dir, "rev-parse", "refs/heads/feature"); branchHead != rebasedHead {
+		t.Fatalf("branch head = %s, want %s", branchHead, rebasedHead)
+	}
+	stored, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.HeadSHA != rebasedHead {
+		t.Fatalf("stored head = %s, want %s", stored.HeadSHA, rebasedHead)
+	}
+}
+
 func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
