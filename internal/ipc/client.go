@@ -145,6 +145,7 @@ func (c *Client) call(ctx context.Context, method string, params interface{}, re
 	if timeout <= 0 {
 		timeout = defaultCallTimeout
 	}
+	c.conn.SetReadDeadline(time.Now().Add(timeout))
 	stop := make(chan struct{})
 	stopped := make(chan struct{})
 	go func() {
@@ -160,7 +161,6 @@ func (c *Client) call(ctx context.Context, method string, params interface{}, re
 		<-stopped
 		_ = c.conn.SetReadDeadline(time.Time{})
 	}()
-	c.conn.SetReadDeadline(time.Now().Add(timeout))
 
 	if !c.scanner.Scan() {
 		if err := ctx.Err(); err != nil {

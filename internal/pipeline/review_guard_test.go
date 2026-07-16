@@ -40,6 +40,22 @@ func TestReviewProgressGuardResetsOnHeadOrFindingProgress(t *testing.T) {
 	}
 }
 
+func TestReviewProgressGuardResetRestartsAutonomousBudget(t *testing.T) {
+	start := time.Unix(250, 0)
+	guard := NewReviewProgressGuard(start, 30*time.Minute, 20*time.Minute)
+	guard.Observe("head-a", `{"findings":[]}`, start)
+
+	resetAt := start.Add(15 * time.Minute)
+	guard.Reset(resetAt)
+	if reason, stopped := guard.StopReason(start.Add(34 * time.Minute)); stopped || reason != "" {
+		t.Fatalf("human approval wait consumed review budget: reason=%q stopped=%v", reason, stopped)
+	}
+	reason, stopped := guard.StopReason(start.Add(35 * time.Minute))
+	if !stopped || reason != ReviewProgressBudgetReason {
+		t.Fatalf("StopReason after reset = %q/%v, want %q/true", reason, stopped, ReviewProgressBudgetReason)
+	}
+}
+
 func TestReviewProgressGuardStopsAtMaximumDuration(t *testing.T) {
 	start := time.Unix(300, 0)
 	guard := NewReviewProgressGuard(start, 30*time.Minute, 20*time.Minute)

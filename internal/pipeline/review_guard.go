@@ -62,12 +62,14 @@ func (g *ReviewProgressGuard) Observe(headSHA, findingsJSON string, now time.Tim
 	g.lastFindingDigest = digest
 }
 
-// Reset marks an explicit human response as progress. Approval waits are not
-// autonomous work and therefore must not consume the no-progress window.
+// Reset starts a fresh autonomous budget after an explicit human response.
+// Approval waits are not autonomous work and therefore must not consume either
+// the no-progress window or the absolute review budget.
 func (g *ReviewProgressGuard) Reset(now time.Time) {
 	if g == nil {
 		return
 	}
+	g.startedAt = now
 	g.lastProgressAt = now
 }
 

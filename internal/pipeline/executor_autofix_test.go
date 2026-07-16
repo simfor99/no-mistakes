@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,29 @@ func TestExecutor_ReviewProgressGuardParksRepeatedFindings(t *testing.T) {
 	}
 	if err := <-done; err == nil {
 		t.Fatal("expected aborted guarded run to return an error")
+	}
+}
+
+func TestExecutor_ReviewProgressGuardPreservesGenuineAgentError(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	cfg := &config.Config{
+		ReviewNoProgressTimeout: time.Millisecond,
+		ReviewMaxDuration:       time.Second,
+	}
+
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(_ *StepContext) (*StepOutcome, error) {
+			time.Sleep(2 * time.Millisecond)
+			return nil, errors.New("provider failed")
+		},
+	}
+
+	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	err := exec.Execute(context.Background(), run, repo, workDir)
+	if err == nil || !strings.Contains(err.Error(), "provider failed") {
+		t.Fatalf("expected genuine agent error to survive guard, got %v", err)
 	}
 }
 
