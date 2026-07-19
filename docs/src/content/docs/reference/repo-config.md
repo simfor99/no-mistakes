@@ -6,13 +6,13 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists and `acp:` targets) with the maintainer's credentials.
+`commands.*` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `document.instructions` and `disable_project_settings` only from that trusted copy.
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
 Commit the gate-control settings you want to your default branch.
-Non-executing fields (`ignore_patterns`, `auto_fix`, `intent`, `test`) are still read from the pushed branch.
+Non-executing fields (`ignore_patterns`, `auto_fix`, `commit`, `intent`, `test`) are still read from the pushed branch.
 
 If you genuinely want per-branch `commands` and `agent` (for example, a single-developer repo where you trust your own feature branches), opt in with [`allow_repo_commands: true`](#allow_repo_commands) in this same file on your default branch. This re-enables the previous behavior with eyes open. The switch is read only from the trusted default-branch copy, so a contributor cannot self-enable it from a pushed branch.
 :::
@@ -48,6 +48,9 @@ auto_fix:
   lint: 5
   ci: 3
 
+commit:
+  fix_message: "chore(no-mistakes-{{.Step}}): {{.Summary}}"
+
 intent:
   enabled: true
   threshold: 0.2
@@ -69,12 +72,14 @@ Override the default agent for this repo and its setup-wizard suggestions.
 | | |
 |---|---|
 | Type | `string` or `string[]` |
-| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `acp:<target>` |
+| Values | `auto`, `claude`, `codex`, `rovodev`, `opencode`, `pi`, `copilot`, `cursor`, `acp:<target>` |
 | Default | Inherits from global config |
 
-`auto` resolves to the first supported native agent found on `PATH` in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, then `copilot`.
-`acp:<target>` uses the user-installed `acpx` binary configured in global config.
-ACP agents are opt-in and are not considered by `agent: auto`.
+`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, then `cursor`.
+`cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
+Its availability uses the global `acpx_path` and `acp_registry_overrides.cursor` settings when present.
+`acp:<target>` uses the user-installed `acpx` binary configured in global config; `acp:cursor` uses the same default command as `cursor`.
+Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
 If the selected explicit agent or `auto` is unavailable, the gate fails before its first pipeline step rather than reporting partial validation as passed.
 
@@ -85,6 +90,7 @@ agent: [codex, claude]
 ```
 
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
+After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
@@ -222,6 +228,21 @@ For empty `commands.lint`, the document step's combined housekeeping pass also a
 `auto_fix.ci` covers the CI step's CI failure and merge-conflict auto-fix attempts.
 
 Legacy alias: `auto_fix.babysit`.
+
+### commit.fix_message
+
+Override the auto-fix commit subject template for this repository.
+
+| | |
+|---|---|
+| Type | `string` |
+| Default | Inherits from global config, whose default is `no-mistakes({{.Step}}): {{.Summary}}` |
+
+The value follows the [global `commit.fix_message` template syntax and validation rules](/no-mistakes/reference/global-config/#commitfix_message).
+That includes the 1,024-byte template limit, 16-placeholder limit, 4,096-byte summary and rendered-subject limits, and rejection of bidi and invisible Unicode format characters.
+The setting applies to the Review, Test, Document, and Lint fix path, not commits created by the Rebase, CI, or Push steps.
+
+This non-executing field is read from the pushed branch, so a branch can adopt its own commit convention without enabling `allow_repo_commands`.
 
 ### intent
 

@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.40.0](https://github.com/kunchenguid/no-mistakes/compare/v1.39.0...v1.40.0) (2026-07-18)
+
+
+### Features
+
+* **agent:** add Cursor as a first-class ACP alias ([#422](https://github.com/kunchenguid/no-mistakes/issues/422)) ([8abc1ed](https://github.com/kunchenguid/no-mistakes/commit/8abc1ed63b5cdef5aca31d4f17c7482aa4275750))
+* **branchsync:** reconcile equivalent diverged sync heads ([#504](https://github.com/kunchenguid/no-mistakes/issues/504)) ([0a2c82f](https://github.com/kunchenguid/no-mistakes/commit/0a2c82f993b9467c5ab84992313dfd13b66830af))
+* **config:** configure pipeline fix commit messages ([#511](https://github.com/kunchenguid/no-mistakes/issues/511)) ([be6921e](https://github.com/kunchenguid/no-mistakes/commit/be6921ef4f739b7e068ec3a315617f3df328f6b6))
+
+
+### Bug Fixes
+
+* **cli:** reattach active AXI runs by submitted head ([#514](https://github.com/kunchenguid/no-mistakes/issues/514)) ([26200ed](https://github.com/kunchenguid/no-mistakes/commit/26200ed06a7ae460396937e49410974f2d2ac81f))
+
+## [1.39.0](https://github.com/kunchenguid/no-mistakes/compare/v1.38.1...v1.39.0) (2026-07-16)
+
+
+### Features
+
+* **branchsync:** recover custody for terminal pipeline-owned runs ([#502](https://github.com/kunchenguid/no-mistakes/issues/502)) ([0bca236](https://github.com/kunchenguid/no-mistakes/commit/0bca23626016105c0c6f56a702b5b7ec3a86f42a))
+
+## [1.38.1](https://github.com/kunchenguid/no-mistakes/compare/v1.38.0...v1.38.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* **pipeline:** use standard git credential env for steps ([#499](https://github.com/kunchenguid/no-mistakes/issues/499)) ([a87d451](https://github.com/kunchenguid/no-mistakes/commit/a87d4516381103722863ebbd29e3fc0aed61e591))
+
+## [1.38.0](https://github.com/kunchenguid/no-mistakes/compare/v1.37.1...v1.38.0) (2026-07-16)
+
+
+### Features
+
+* **branchsync:** add guarded local branch synchronization ([#496](https://github.com/kunchenguid/no-mistakes/issues/496)) ([e9b4c14](https://github.com/kunchenguid/no-mistakes/commit/e9b4c14dfd6b444049e1d594b26e40124c4973a3))
+
+## [1.37.1](https://github.com/kunchenguid/no-mistakes/compare/v1.37.0...v1.37.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* **pipeline:** defer run-owned delivery findings ([#494](https://github.com/kunchenguid/no-mistakes/issues/494)) ([fc0845a](https://github.com/kunchenguid/no-mistakes/commit/fc0845a231628857a628b0f8818cc2a199c48eab))
+* **pipeline:** reconcile parked CI gates ([#486](https://github.com/kunchenguid/no-mistakes/issues/486)) ([2bbbc14](https://github.com/kunchenguid/no-mistakes/commit/2bbbc143bd4520056e97957883a02615657b2a62))
+
 ## [1.37.0](https://github.com/kunchenguid/no-mistakes/compare/v1.36.0...v1.37.0) (2026-07-13)
 
 

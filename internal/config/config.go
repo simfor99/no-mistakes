@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -66,6 +67,7 @@ type GlobalConfig struct {
 	// session_reuse: false to force every invocation cold.
 	SessionReuse bool `yaml:"-"`
 	AutoFix      AutoFixRaw
+	Commit       CommitRaw
 	Intent       IntentRaw
 	Test         TestRaw
 }
@@ -85,6 +87,7 @@ type globalConfigRaw struct {
 	LogLevel                      string              `yaml:"log_level"`
 	SessionReuse                  *bool               `yaml:"session_reuse"`
 	AutoFix                       AutoFixRaw          `yaml:"auto_fix"`
+	Commit                        CommitRaw           `yaml:"commit"`
 	Intent                        IntentRaw           `yaml:"intent"`
 	Test                          TestRaw             `yaml:"test"`
 }
@@ -103,6 +106,7 @@ type RepoConfig struct {
 	// the pushed branch controls nothing that executes.
 	AllowRepoCommands bool       `yaml:"allow_repo_commands"`
 	AutoFix           AutoFixRaw `yaml:"auto_fix"`
+	Commit            CommitRaw  `yaml:"commit"`
 	Intent            IntentRaw  `yaml:"intent"`
 	Test              TestRaw    `yaml:"test"`
 	// Document carries the repository's documentation placement policy. It
@@ -139,6 +143,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		IgnorePatterns         []string    `yaml:"ignore_patterns"`
 		AllowRepoCommands      bool        `yaml:"allow_repo_commands"`
 		AutoFix                AutoFixRaw  `yaml:"auto_fix"`
+		Commit                 CommitRaw   `yaml:"commit"`
 		Intent                 IntentRaw   `yaml:"intent"`
 		Test                   TestRaw     `yaml:"test"`
 		Document               DocumentRaw `yaml:"document"`
@@ -154,6 +159,7 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.IgnorePatterns = raw.IgnorePatterns
 	c.AllowRepoCommands = raw.AllowRepoCommands
 	c.AutoFix = raw.AutoFix
+	c.Commit = raw.Commit
 	c.Intent = raw.Intent
 	c.Test = raw.Test
 	c.Document = raw.Document
@@ -207,6 +213,7 @@ type Config struct {
 	Commands                      Commands
 	IgnorePatterns                []string
 	AutoFix                       AutoFix
+	Commit                        Commit
 	Intent                        Intent
 	Test                          Test
 	Document                      Document
@@ -319,17 +326,20 @@ const defaultConfigYAML = `# no-mistakes global configuration
 
 # Agent to use for code generation. This may also be an ordered fallback list,
 # for example: agent: [codex, claude]
-# Options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target>
-# "auto" detects the first available native agent on your system
+# Options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target>
+# "auto" detects the first available native agent or ACP alias on your system
+# "cursor" is an ACP alias for acp:cursor using cursor-agent acp via acpx
+# "acp:cursor" also uses that Cursor default command
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 agent: auto
 
-# Optional path to the user-installed acpx binary for acp:<target> agents
+# Optional path to the user-installed acpx binary for acp:<target> agents and ACP aliases
 # acpx_path: acpx
 
-# Optional ACP target command overrides for acp:<target> agents
+# Optional ACP target command overrides for acp:<target> agents and ACP aliases
 # acp_registry_overrides:
 #   local-gemini: node /opt/mock-acp-agent.mjs
+#   cursor: cursor-agent acp
 
 # Maximum time the CI monitor babysits an open PR with no base-branch movement
 # before giving up. The monitor watches CI and auto-rebases when the base branch
@@ -389,6 +399,11 @@ auto_fix:
   document: 3
   ci: 3
 
+# Auto-fix commit subject template. Available variables: {{.Step}} and {{.Summary}}.
+# Repo config may override this value.
+# commit:
+#   fix_message: "no-mistakes({{.Step}}): {{.Summary}}"
+
 # User-intent extraction. When you push a branch, no-mistakes can read recent
 # transcripts from your local agent (Claude Code, Codex, OpenCode, Rovo Dev, Pi,
 # Copilot CLI), pick the session that produced the change, summarize the user
@@ -421,8 +436,8 @@ var defaultBinary = map[types.AgentName]string{
 	types.AgentCopilot:  "copilot",
 }
 
-// agentProbeOrder is the priority order for auto-detecting agents.
-var agentProbeOrder = []types.AgentName{
+// nativeAgentProbeOrder is the priority order for auto-detecting native agents.
+var nativeAgentProbeOrder = []types.AgentName{
 	types.AgentClaude,
 	types.AgentCodex,
 	types.AgentOpenCode,
@@ -432,12 +447,8 @@ var agentProbeOrder = []types.AgentName{
 }
 
 func isACPAgent(name types.AgentName) bool {
-	value := string(name)
-	if !strings.HasPrefix(value, "acp:") {
-		return false
-	}
-	target := strings.TrimPrefix(value, "acp:")
-	return target != "" && !strings.ContainsAny(target, " \t\r\n")
+	_, ok := types.ACPTargetFor(name)
+	return ok
 }
 
 var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
@@ -471,9 +482,10 @@ var probeRovoDevSupport = func(ctx context.Context, bin string) (bool, error) {
 }
 
 // ResolveAgent resolves configured agent names to available agents. A single
-// explicit agent must be runnable; auto is probed into the first available
-// native agent; an ordered list is filtered to available agents and kept as fallbacks.
-// The lookPath function should behave like exec.LookPath.
+// explicit agent must be runnable; auto probes native agents, then ACP aliases;
+// an ordered list is filtered to available agents, deduplicated by resolved
+// identity, and kept as fallbacks. The lookPath function should behave like
+// exec.LookPath.
 func (c *Config) ResolveAgent(ctx context.Context, lookPath func(string) (string, error)) error {
 	candidates := c.configuredAgents()
 	if len(candidates) <= 1 {
@@ -520,8 +532,8 @@ func (c *Config) configuredAgents() []types.AgentName {
 }
 
 func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (string, error)) (types.AgentName, error) {
-	probed := make([]string, 0, len(agentProbeOrder))
-	for _, name := range agentProbeOrder {
+	probed := make([]string, 0, len(nativeAgentProbeOrder)+len(types.ACPAliases())+1)
+	for _, name := range nativeAgentProbeOrder {
 		bin := string(name)
 		if b, ok := defaultBinary[name]; ok {
 			bin = b
@@ -548,12 +560,22 @@ func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (st
 			return "", fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
 		}
 	}
+	for _, alias := range types.ACPAliases() {
+		available, bins, err := c.acpAvailable(alias.Name, lookPath)
+		probed = append(probed, bins...)
+		if err != nil {
+			return "", err
+		}
+		if available {
+			return alias.Name, nil
+		}
+	}
 	return "", noRunnableAgentError([]types.AgentName{types.AgentAuto}, probed)
 }
 
 func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, lookPath func(string) (string, error)) ([]types.AgentName, error) {
 	resolved := make([]types.AgentName, 0, len(candidates))
-	seen := map[types.AgentName]bool{}
+	seen := map[string]bool{}
 	probed := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		name, ok, probe, err := c.resolveConfiguredAgent(ctx, candidate, lookPath)
@@ -563,16 +585,27 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 		if err != nil {
 			return nil, err
 		}
-		if !ok || seen[name] {
+		if !ok {
 			continue
 		}
-		seen[name] = true
+		identity := resolvedAgentIdentity(name)
+		if seen[identity] {
+			continue
+		}
+		seen[identity] = true
 		resolved = append(resolved, name)
 	}
 	if len(resolved) == 0 {
 		return nil, noRunnableAgentError(candidates, probed)
 	}
 	return resolved, nil
+}
+
+func resolvedAgentIdentity(name types.AgentName) string {
+	if target, ok := types.ACPTargetFor(name); ok {
+		return "acp:" + target
+	}
+	return "native:" + string(name)
 }
 
 func noRunnableAgentError(configured []types.AgentName, probed []string) error {
@@ -596,7 +629,15 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 		return resolved, err == nil, "auto", err
 	}
 	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
-		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+	}
+	if isACPAgent(name) {
+		available, bins, err := c.acpAvailable(name, lookPath)
+		probe := strings.Join(bins, ", ")
+		if err != nil {
+			return "", false, probe, err
+		}
+		return name, available, probe, nil
 	}
 	bin := c.AgentPathFor(name)
 	resolvedBin, err := lookPath(bin)
@@ -619,7 +660,7 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 }
 
 // AgentPath returns the binary path for the configured agent.
-// ACP agents use acpx_path if set, otherwise acpx.
+// ACP agents and ACP aliases use acpx_path if set, otherwise acpx.
 // Native agents use agent_path_override if set, otherwise the default binary name.
 func (c *Config) AgentPath() string {
 	return c.AgentPathFor(c.Agent)
@@ -641,6 +682,90 @@ func (c *Config) AgentPathFor(name types.AgentName) string {
 		return b
 	}
 	return string(name)
+}
+
+// acpAvailable reports whether the acpx shim and any probeable raw-command
+// executable can be resolved. Only bare command names and clean absolute paths
+// are probeable; relative, quoted, or escaped raw commands are left for acpx to
+// execute from the worktree. It returns the binaries it considered for diagnostics.
+func (c *Config) acpAvailable(name types.AgentName, lookPath func(string) (string, error)) (bool, []string, error) {
+	bins := c.acpBinaries(name)
+	for _, bin := range bins {
+		if _, err := lookPath(bin); err != nil {
+			if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+				return false, bins, nil
+			}
+			return false, bins, fmt.Errorf("resolve %s agent from %q: %w", name, bin, err)
+		}
+	}
+	return true, bins, nil
+}
+
+func (c *Config) acpBinaries(name types.AgentName) []string {
+	bins := make([]string, 0, 2)
+	if target, ok := types.ACPTargetFor(name); ok {
+		if bin, probeable := acpCommandBinaryForProbe(types.ACPRawCommand(target, c.ACPRegistryOverrides)); probeable {
+			bins = append(bins, bin)
+		}
+	}
+	return append(bins, c.AgentPathFor(name))
+}
+
+func acpCommandBinaryForProbe(command string) (string, bool) {
+	return acpCommandBinaryForProbeForOS(command, runtime.GOOS)
+}
+
+func acpCommandBinaryForProbeForOS(command, goos string) (string, bool) {
+	if strings.ContainsAny(command, `"'`) {
+		return "", false
+	}
+	if goos != "windows" && strings.ContainsRune(command, '\\') {
+		return "", false
+	}
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "", false
+	}
+	bin := fields[0]
+	if isAbsolutePathForProbe(bin, goos) {
+		return bin, true
+	}
+	if containsPathSeparatorForProbe(bin, goos) {
+		return "", false
+	}
+	return bin, true
+}
+
+func isAbsolutePathForProbe(path, goos string) bool {
+	if goos == runtime.GOOS {
+		return filepath.IsAbs(path)
+	}
+	if goos == "windows" {
+		return isWindowsAbsolutePath(path)
+	}
+	return strings.HasPrefix(path, "/")
+}
+
+func isWindowsAbsolutePath(path string) bool {
+	if len(path) >= 3 && isASCIILetter(path[0]) && path[1] == ':' && isWindowsPathSeparator(path[2]) {
+		return true
+	}
+	return len(path) >= 3 && isWindowsPathSeparator(path[0]) && isWindowsPathSeparator(path[1])
+}
+
+func isASCIILetter(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+}
+
+func isWindowsPathSeparator(value byte) bool {
+	return value == '\\' || value == '/'
+}
+
+func containsPathSeparatorForProbe(path, goos string) bool {
+	if goos == "windows" {
+		return strings.ContainsAny(path, `/\`)
+	}
+	return strings.ContainsRune(path, '/')
 }
 
 // AgentArgs returns extra CLI args for the configured native agent, as declared in
@@ -794,6 +919,9 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateCommitRaw(raw.Commit); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -854,6 +982,7 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 		raw.AutoFix.CI = raw.AutoFix.Babysit
 	}
 	cfg.AutoFix = raw.AutoFix
+	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
 
@@ -920,6 +1049,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	if err := validateCommitRaw(cfg.Commit); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
 	if cfg.AutoFix.CI == nil {
 		cfg.AutoFix.CI = cfg.AutoFix.Babysit
 	}
@@ -949,8 +1081,8 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 // branch - this blocks the supply-chain vector for repos that ship
 // .no-mistakes.yaml only on feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, intent, test) are always
-// taken from the pushed copy, matching prior behavior, since they cannot
+// Non-executing fields (ignore patterns, auto-fix, commit, intent, test) are
+// always taken from the pushed copy, matching prior behavior, since they cannot
 // run arbitrary shell or select a process.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
@@ -1126,6 +1258,14 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyTestOverrides(&test, &global.Test)
 	applyTestOverrides(&test, &repo.Test)
 
+	commit := Commit{FixMessage: DefaultFixMessageTemplate}
+	if global.Commit.FixMessage != nil {
+		commit.FixMessage = *global.Commit.FixMessage
+	}
+	if repo.Commit.FixMessage != nil {
+		commit.FixMessage = *repo.Commit.FixMessage
+	}
+
 	cfg := &Config{
 		Agent:                         global.Agent,
 		Agents:                        copyAgents(global.Agents),
@@ -1141,6 +1281,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Commands:                      repo.Commands,
 		IgnorePatterns:                repo.IgnorePatterns,
 		AutoFix:                       af,
+		Commit:                        commit,
 		Intent:                        intent,
 		Test:                          test,
 		Document:                      Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
