@@ -423,7 +423,11 @@ func serveFakeGitHubProvenanceAPI(args []string, checksJSON string) bool {
 	joined := strings.Join(args, " ")
 	switch {
 	case strings.Contains(joined, "/protection/required_status_checks"):
-		fmt.Fprintln(os.Stderr, "Branch not protected")
+		message := os.Getenv("FAKE_CLI_PROTECTION_ERROR")
+		if message == "" {
+			message = "Branch not protected"
+		}
+		fmt.Fprintln(os.Stderr, message)
 		os.Exit(1)
 		return false
 	case strings.Contains(joined, "/rules/branches/"):

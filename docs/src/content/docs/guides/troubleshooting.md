@@ -245,6 +245,8 @@ If the PR is still open at the timeout, the step pauses for approval with findin
 You can approve, fix, or skip from the TUI or `no-mistakes axi respond`.
 Use `no-mistakes axi abort` only when you mean to cancel the whole active run.
 
+If GitHub reports an unresolved required-check policy and no trustworthy CI result for the exact PR head, No Mistakes now pauses after its short registration grace period instead of waiting for the full CI timeout. This is a decision point, not a green result. Confirm it only after you have established a provider outage, such as exhausted GitHub Actions budget, and the local required checks passed for the same head. Record the result as `external_ci_not_run_budget_exhausted`; branch protection still applies.
+
 ## Step looks quiet or wedged
 
 Symptom: `no-mistakes axi status` shows an active step with `last_activity` prefixed by `quiet`, or a review/test/lint step appears to run for longer than expected.

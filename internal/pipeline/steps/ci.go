@@ -392,6 +392,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				case !prStateKnown || !mergeabilityKnown:
 					clearCIMonitorReady(sctx)
 					lastMonitorLog = ""
+				case githubPolicyUnavailable(provider, checks) && elapsed >= s.gracePeriod():
+					clearCIMonitorReady(sctx)
+					sctx.Log("GitHub required-check policy is unavailable; parking for explicit external-CI confirmation")
+					return ciExternalUnavailableOutcome(), nil
 				case pending:
 					// Checks are (re-)running with no failures yet. Surface this
 					// so a PR that passed checks and starts re-running clears the

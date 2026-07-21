@@ -48,6 +48,20 @@ func hasPendingChecks(checks []scm.Check) bool {
 	return false
 }
 
+// githubPolicyUnavailable is deliberately narrow: GitHub emits this synthetic
+// blocking check when it cannot establish the required-check policy. It does
+// not prove that Actions credits are exhausted. Callers must present an
+// explicit human approval gate rather than treating it as a passed CI result.
+func githubPolicyUnavailable(provider scm.Provider, checks []scm.Check) bool {
+	if provider != scm.ProviderGitHub || len(checks) != 1 {
+		return false
+	}
+	check := checks[0]
+	return check.Name == "GitHub required-check policy unresolved" &&
+		check.Source == scm.CheckSourceUnknown &&
+		check.Pending()
+}
+
 // failingCheckNames returns the names of failing checks.
 func failingCheckNames(checks []scm.Check) []string {
 	var names []string
@@ -192,6 +206,22 @@ func ciMonitoringTimeoutOutcome() *pipeline.StepOutcome {
 		Items: []Finding{{
 			Severity:    "warning",
 			Description: "PR was still open when CI monitoring timed out",
+			Action:      types.ActionAskUser,
+		}},
+	}
+	findingsJSON, _ := json.Marshal(findings)
+	return &pipeline.StepOutcome{
+		NeedsApproval: true,
+		Findings:      string(findingsJSON),
+	}
+}
+
+func ciExternalUnavailableOutcome() *pipeline.StepOutcome {
+	findings := Findings{
+		Summary: "External GitHub CI could not be established for this PR head",
+		Items: []Finding{{
+			Severity:    "warning",
+			Description: "GitHub could not establish the required-check policy and no trustworthy external CI result is available. This is not a pass. Confirm only after verifying that the CI provider is unavailable (for example because its budget is exhausted) and that the local required checks for this exact head have passed. The receipt must record external_ci_not_run_budget_exhausted.",
 			Action:      types.ActionAskUser,
 		}},
 	}
