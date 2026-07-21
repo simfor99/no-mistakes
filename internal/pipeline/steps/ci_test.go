@@ -337,6 +337,40 @@ func TestCIStep_GetCIChecksNoChecksReported(t *testing.T) {
 	}
 }
 
+func TestCIStep_GitHubPolicyUnavailableParksForExplicitExternalCIGate(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env := append(fakeCIGH(t, "OPEN", "[]"), "FAKE_CLI_PROTECTION_ERROR=HTTP 403: GitHub Actions unavailable")
+
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = time.Minute
+
+	started := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	current := started
+	step := &CIStep{
+		checksGracePeriod: time.Second,
+		now:               func() time.Time { return current },
+		baseBranchTip:     func(context.Context) (string, bool) { return "base", true },
+		waitForNextPoll: func(context.Context, time.Duration) error {
+			current = started.Add(2 * time.Second)
+			return nil
+		},
+	}
+
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("expected explicit external-CI approval gate, got %+v", outcome)
+	}
+	if !strings.Contains(outcome.Findings, "external_ci_not_run_budget_exhausted") {
+		t.Fatalf("expected durable external CI receipt marker, got %s", outcome.Findings)
+	}
+}
+
 func TestCIStep_AllChecksPassingKeepsMonitoringOpenPR(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
