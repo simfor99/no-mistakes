@@ -24,6 +24,8 @@ var errNoStructuredOutput = errors.New("claude returned no structured output")
 
 const claudeScannerMaxTokenSize = 256 * 1024 * 1024
 
+const claudeStreamErrorTextLimit = 4 * 1024
+
 // claudeAgent spawns the claude CLI for each invocation.
 type claudeAgent struct {
 	bin       string
@@ -94,7 +96,8 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 
 	var usage TokenUsage
 	var result *claudeResult
-	if err := parseClaudeEvents(ctx, started.stdout, opts.OnChunk, &usage, &result); err != nil {
+	var streamText string
+	if err := parseClaudeEventsWithStreamText(ctx, started.stdout, opts.OnChunk, &usage, &result, &streamText); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("claude parse events: %w", err)
@@ -105,7 +108,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	waitErr := started.wait()
 	stderrWG.Wait()
 	if waitErr != nil {
-		retErr := fmt.Errorf("claude exited: %w: %s", waitErr, string(stderrBuf))
+		retErr := fmt.Errorf("claude exited: %w: %s", waitErr, claudeExitErrorDetail(result, streamText, string(stderrBuf)))
 		emitAgentExited(opts, "claude", pid, retErr)
 		return nil, retErr
 	}
@@ -144,7 +147,11 @@ func (a *claudeAgent) Close() error { return nil }
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
 	if result.IsError || result.Subtype != "success" {
-		return nil, fmt.Errorf("claude error: subtype=%s", result.Subtype)
+		detail := fmt.Sprintf("claude error: subtype=%s", result.Subtype)
+		if text := claudeResultDiagnosticText(result, result.text); text != "" {
+			detail += ": " + text
+		}
+		return nil, errors.New(detail)
 	}
 	if len(schema) > 0 && result.StructuredOutput == nil {
 		return nil, errNoStructuredOutput
@@ -157,6 +164,46 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 		UsageReported:         usage.Reported,
 		CacheCreationReported: usage.CacheCreationReported,
 	}, nil
+}
+
+func claudeExitErrorDetail(result *claudeResult, streamText, stderr string) string {
+	detail := ""
+	if result != nil && result.IsError {
+		detail = fmt.Sprintf("claude result error: subtype=%s", result.Subtype)
+		if text := claudeResultDiagnosticText(result, streamText); text != "" {
+			detail += ": " + text
+		}
+	}
+	if detail == "" {
+		detail = claudeStreamFailureDetail(streamText)
+	}
+	stderr = strings.TrimSpace(stderr)
+	if detail != "" && stderr != "" {
+		return detail + "; " + stderr
+	}
+	if detail != "" {
+		return detail
+	}
+	return stderr
+}
+
+func claudeResultDiagnosticText(result *claudeResult, streamText string) string {
+	if result != nil {
+		if text := strings.TrimSpace(result.resultText); text != "" {
+			return text
+		}
+	}
+	return strings.TrimSpace(streamText)
+}
+
+func claudeStreamFailureDetail(streamText string) string {
+	text := strings.TrimSpace(streamText)
+	lowerText := strings.ToLower(text)
+	index := strings.LastIndex(lowerText, "api error:")
+	if index < 0 {
+		return ""
+	}
+	return "claude stream error: " + text[index:]
 }
 
 // buildArgs constructs the claude CLI arguments. User-supplied extraArgs
@@ -265,6 +312,7 @@ type claudeEvent struct {
 	// result fields
 	Subtype          string          `json:"subtype,omitempty"`
 	IsError          bool            `json:"is_error,omitempty"`
+	Result           string          `json:"result,omitempty"`
 	StructuredOutput json.RawMessage `json:"structured_output,omitempty"`
 	Usage            *claudeUsage    `json:"usage,omitempty"`
 }
@@ -278,6 +326,7 @@ type claudeResult struct {
 	rawEvent         json.RawMessage
 	sessionID        string // durable session identity from the event stream
 	model            string // model reported by assistant events
+	resultText       string // diagnostic text carried by a terminal result event
 }
 
 type claudeUsage struct {
@@ -301,6 +350,10 @@ type claudeContent struct {
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
 // It accumulates token usage and captures the final result event.
 func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult) error {
+	return parseClaudeEventsWithStreamText(ctx, r, onChunk, usage, result, nil)
+}
+
+func parseClaudeEventsWithStreamText(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult, streamText *string) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), claudeScannerMaxTokenSize)
 	var textBuf string
@@ -347,6 +400,9 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			for _, c := range msg.Content {
 				if c.Type == "text" && c.Text != "" {
 					textBuf += c.Text
+					if streamText != nil {
+						*streamText = appendClaudeStreamText(*streamText, c.Text)
+					}
 					if onChunk != nil {
 						onChunk(c.Text)
 					}
@@ -365,10 +421,19 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 					rawEvent:         raw,
 					sessionID:        lastSessionID,
 					model:            lastModel,
+					resultText:       appendClaudeStreamText("", event.Result),
 				}
 			}
 		}
 	}
 
 	return scanner.Err()
+}
+
+func appendClaudeStreamText(existing, next string) string {
+	if len(existing)+len(next) <= claudeStreamErrorTextLimit {
+		return existing + next
+	}
+	combined := existing + next
+	return combined[len(combined)-claudeStreamErrorTextLimit:]
 }

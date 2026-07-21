@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -94,6 +97,123 @@ func TestClaudeAgent_BuildArgs_UserPermissionModeSuppressesDefault(t *testing.T)
 		} else if dangerCount != 0 {
 			t.Errorf("extra=%v expected no default --dangerously-skip-permissions, got: %v", extra, args)
 		}
+	}
+}
+
+func writeFakeClaude(t *testing.T, dir, posixScript, windowsScript string) string {
+	t.Helper()
+
+	name := "claude"
+	script := posixScript
+	if runtime.GOOS == "windows" {
+		name = "claude.cmd"
+		script = windowsScript
+	}
+
+	bin := filepath.Join(dir, name)
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake claude: %v", err)
+	}
+	return bin
+}
+
+func TestClaudeAgent_RunIncludesStreamErrorWithStderrOnExit(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeClaude(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"API Error: The model has reached its context window limit."}]}}'
+printf '%s\n' '{"type":"result","subtype":"error","is_error":true}'
+echo 'claude.ai connectors are disabled because another auth source is set' >&2
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"API Error: The model has reached its context window limit.\"}]}}",
+		"echo {\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true}",
+		"echo claude.ai connectors are disabled because another auth source is set 1>&2",
+		"exit /b 1",
+	}, "\r\n"))
+
+	_, err := (&claudeAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt: "test the change",
+		CWD:    t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected claude failure")
+	}
+	if !strings.Contains(err.Error(), "context window limit") {
+		t.Fatalf("error = %v, want stream error detail", err)
+	}
+	if !strings.Contains(err.Error(), "connectors are disabled") {
+		t.Fatalf("error = %v, want stderr warning", err)
+	}
+}
+
+func TestClaudeAgent_RunIncludesStreamErrorWithoutResultOnExit(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeClaude(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"API Error: The model has reached its context window limit."}]}}'
+echo 'claude.ai connectors are disabled because another auth source is set' >&2
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"API Error: The model has reached its context window limit.\"}]}}",
+		"echo claude.ai connectors are disabled because another auth source is set 1>&2",
+		"exit /b 1",
+	}, "\r\n"))
+
+	_, err := (&claudeAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt: "test the change",
+		CWD:    t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected claude failure")
+	}
+	if !strings.Contains(err.Error(), "context window limit") {
+		t.Fatalf("error = %v, want stream error detail", err)
+	}
+	if !strings.Contains(err.Error(), "connectors are disabled") {
+		t.Fatalf("error = %v, want stderr warning", err)
+	}
+}
+
+func TestClaudeAgent_RunIncludesResultErrorWithStderrOnExit(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeClaude(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"result":"API Error: The model has reached its context window limit."}'
+echo 'claude.ai connectors are disabled because another auth source is set' >&2
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"result\",\"subtype\":\"error\",\"is_error\":true,\"result\":\"API Error: The model has reached its context window limit.\"}",
+		"echo claude.ai connectors are disabled because another auth source is set 1>&2",
+		"exit /b 1",
+	}, "\r\n"))
+
+	_, err := (&claudeAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt: "test the change",
+		CWD:    t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected claude failure")
+	}
+	if !strings.Contains(err.Error(), "context window limit") {
+		t.Fatalf("error = %v, want result error detail", err)
+	}
+	if !strings.Contains(err.Error(), "connectors are disabled") {
+		t.Fatalf("error = %v, want stderr warning", err)
+	}
+}
+
+func TestFinalizeClaudeResult_IncludesResultDiagnosticForError(t *testing.T) {
+	_, err := finalizeClaudeResult(&claudeResult{
+		Subtype:    "error",
+		IsError:    true,
+		resultText: "API Error: The model has reached its context window limit.",
+	}, nil, TokenUsage{})
+	if err == nil {
+		t.Fatal("expected claude error")
+	}
+	if !strings.Contains(err.Error(), "context window limit") {
+		t.Fatalf("error = %v, want result error detail", err)
 	}
 }
 
