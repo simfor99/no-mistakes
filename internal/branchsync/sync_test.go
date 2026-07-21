@@ -500,6 +500,9 @@ func TestApplyEmptyLocalUniquenessStillUsesStrictBehindFastForward(t *testing.T)
 func TestApplyReportsHonestFinalStateWhenPostMergeHookMutatesWorktree(t *testing.T) {
 	f := newSyncFixture(t)
 	hooks := filepath.Join(f.local, ".git", "hooks")
+	// Keep this regression self-contained when the developer environment sets
+	// a global core.hooksPath for its own automation.
+	mustRun(t, f.local, "config", "core.hooksPath", hooks)
 	hook := filepath.Join(hooks, "post-merge")
 	mustWrite(t, hook, "#!/bin/sh\nprintf hook > hook-output.txt\nexit 1\n")
 	if err := os.Chmod(hook, 0o755); err != nil {

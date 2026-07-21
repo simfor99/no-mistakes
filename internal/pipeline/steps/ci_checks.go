@@ -59,6 +59,7 @@ func githubPolicyUnavailable(provider scm.Provider, checks []scm.Check) bool {
 	check := checks[0]
 	return check.Name == "GitHub required-check policy unresolved" &&
 		check.Source == scm.CheckSourceUnknown &&
+		check.BlocksPending &&
 		check.Pending()
 }
 
