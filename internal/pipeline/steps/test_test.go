@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -192,6 +193,7 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
 	sctx.UserIntent = "Show users a success screen after checkout"
+	sctx.Config.Test.AgentAfterCommand = true
 
 	step := &TestStep{}
 	outcome, err := step.Execute(sctx)
@@ -253,6 +255,51 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 	t.Logf("evidence findings JSON: %s", outcome.Findings)
 	if len(findings.Tested) != 2 || findings.Tested[0] != testCmd || findings.Tested[1] != "manual screenshot review" {
 		t.Fatalf("expected baseline command and agent-tested evidence to be recorded, got %+v", findings.Tested)
+	}
+}
+
+func TestTestStep_ConfiguredCommandSkipsEvidenceAgentWhenDisabled(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	baselineLog := filepath.Join(dir, "baseline.log")
+	testCmd := "go env GOOS > baseline.log"
+
+	callCount := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			callCount++
+			return nil, errors.New("evidence agent must not run")
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
+	sctx.UserIntent = "Show users a success screen after checkout"
+	sctx.Config.Test.AgentAfterCommand = false
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatal("expected no approval after a passing configured command")
+	}
+	if callCount != 0 {
+		t.Fatalf("expected no evidence agent call after configured command, got %d", callCount)
+	}
+	data, err := os.ReadFile(baselineLog)
+	if err != nil {
+		t.Fatalf("expected configured test command to run: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != runtime.GOOS {
+		t.Fatalf("configured test command output = %q, want %s", string(data), runtime.GOOS)
+	}
+
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Tested) != 1 || findings.Tested[0] != testCmd {
+		t.Fatalf("tested = %+v, want only configured command", findings.Tested)
 	}
 }
 

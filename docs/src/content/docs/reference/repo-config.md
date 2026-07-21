@@ -140,7 +140,18 @@ Explicit test command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
 When empty, the agent detects and runs relevant tests itself.
-When user intent is available, the agent may still run after a successful baseline command to gather evidence-oriented validation.
+When user intent is available, the agent may still run after a successful baseline command to gather evidence-oriented validation. Set `test.agent_after_command: false` when the configured command is the complete, deterministic test contract and the run must not expand its test scope autonomously.
+
+### test.agent_after_command
+
+Controls the optional evidence-oriented agent pass after a successful `commands.test` baseline.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `true` |
+
+Set this to `false` together with an explicit `commands.test` when that command already covers the intended test contract. This keeps the test step deterministic for both Codex and Claude-compatible providers. It does not disable test detection when `commands.test` is empty: in that case an agent still has to determine which tests to run.
 
 ### commands.lint
 

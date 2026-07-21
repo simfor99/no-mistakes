@@ -14,6 +14,19 @@ func TestTestEvidenceDefaults(t *testing.T) {
 	if got.Evidence.Dir != ".no-mistakes/evidence" {
 		t.Errorf("default Dir = %q, want .no-mistakes/evidence", got.Evidence.Dir)
 	}
+	if !got.AgentAfterCommand {
+		t.Error("default AgentAfterCommand should be true")
+	}
+}
+
+func TestTestAgentAfterCommandMerge_RepoCanDisable(t *testing.T) {
+	disabled := false
+	repo := &RepoConfig{Test: TestRaw{AgentAfterCommand: &disabled}}
+
+	cfg := Merge(&GlobalConfig{}, repo)
+	if cfg.Test.AgentAfterCommand {
+		t.Error("repo should be able to disable the evidence agent after a configured command")
+	}
 }
 
 func TestTestEvidenceMerge_GlobalEnable(t *testing.T) {
@@ -63,6 +76,7 @@ func TestLoadGlobalConfig_TestEvidenceParsed(t *testing.T) {
 	yaml := `
 agent: claude
 test:
+  agent_after_command: false
   evidence:
     store_in_repo: true
     dir: artifacts/evidence
@@ -80,6 +94,9 @@ test:
 	}
 	if cfg.Test.Evidence.Dir == nil || *cfg.Test.Evidence.Dir != "artifacts/evidence" {
 		t.Error("expected Dir=artifacts/evidence")
+	}
+	if cfg.Test.AgentAfterCommand == nil || *cfg.Test.AgentAfterCommand {
+		t.Error("expected AgentAfterCommand=false")
 	}
 }
 
@@ -100,5 +117,24 @@ test:
 	}
 	if cfg.Test.Evidence.StoreInRepo == nil || !*cfg.Test.Evidence.StoreInRepo {
 		t.Error("expected repo StoreInRepo=true")
+	}
+}
+
+func TestLoadRepoConfig_TestAgentAfterCommandParsed(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+test:
+  agent_after_command: false
+`
+	if err := os.WriteFile(filepath.Join(dir, ".no-mistakes.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg, err := LoadRepo(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Test.AgentAfterCommand == nil || *cfg.Test.AgentAfterCommand {
+		t.Error("expected AgentAfterCommand=false")
 	}
 }

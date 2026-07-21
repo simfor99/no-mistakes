@@ -389,6 +389,19 @@ Partial matches older than 24 hours are rejected unless their raw score is at le
 If exactly one accepted candidate has a raw score of at least `0.85`, that decisive candidate wins before recency ranking.
 Otherwise, accepted candidates are ranked by confidence, which combines the raw score with a small recency boost, with ties going to the most recent matching session, and ambiguous accepted candidates may be disambiguated by the configured pipeline agent.
 
+### test.agent_after_command
+
+Controls the optional evidence-oriented agent pass after a successful
+`commands.test` baseline.
+
+| Field                      | Type   | Default | Description |
+| -------------------------- | ------ | ------- | ----------- |
+| `test.agent_after_command` | `bool` | `true`  | Run the evidence agent after a passing configured test command when user intent is available |
+
+Set this to `false` together with a complete, deterministic `commands.test` to
+keep the test step bounded. It does not disable agent-driven test detection
+when `commands.test` is empty.
+
 ### test.evidence
 
 Test-step evidence storage settings.
@@ -407,7 +420,7 @@ When `store_in_repo` is true, the test step writes evidence under `<dir>/<branch
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
 If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
 
-These are global defaults. Per-repo config can override either field.
+These are global defaults. Per-repo config can override these fields.
 
 ## Environment variables
 

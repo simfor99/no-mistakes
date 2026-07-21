@@ -114,7 +114,7 @@ Previous test findings to address:
 		}
 	}
 
-	useEvidenceAgent := testCmd == "" || cleanedUserIntent(sctx) != ""
+	useEvidenceAgent := testCmd == "" || (sctx.Config.Test.AgentAfterCommand && cleanedUserIntent(sctx) != "")
 	if useEvidenceAgent {
 		evidenceLocation := resolveTestEvidenceLocation(sctx.WorkDir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
 		evidenceDir := evidenceLocation.Dir

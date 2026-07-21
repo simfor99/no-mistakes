@@ -233,7 +233,8 @@ type Document struct {
 
 // TestRaw is the YAML representation of test-step settings.
 type TestRaw struct {
-	Evidence EvidenceRaw `yaml:"evidence"`
+	Evidence          EvidenceRaw `yaml:"evidence"`
+	AgentAfterCommand *bool       `yaml:"agent_after_command"`
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -245,7 +246,8 @@ type EvidenceRaw struct {
 
 // Test is the resolved test-step config.
 type Test struct {
-	Evidence Evidence
+	Evidence          Evidence
+	AgentAfterCommand bool
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -421,6 +423,9 @@ intent:
 # commit them into the repo under a readable, branch-named directory so they are
 # pushed and render directly on the PR.
 # test:
+#   # Set false when commands.test is the complete, deterministic test contract.
+#   # The agent still detects tests itself when commands.test is empty.
+#   agent_after_command: false
 #   evidence:
 #     store_in_repo: true
 #     dir: .no-mistakes/evidence
@@ -1174,11 +1179,15 @@ func testDefaults() Test {
 			StoreInRepo: false,
 			Dir:         ".no-mistakes/evidence",
 		},
+		AgentAfterCommand: true,
 	}
 }
 
 // applyTestOverrides applies non-nil raw values onto resolved defaults.
 func applyTestOverrides(dst *Test, src *TestRaw) {
+	if src.AgentAfterCommand != nil {
+		dst.AgentAfterCommand = *src.AgentAfterCommand
+	}
 	if src.Evidence.StoreInRepo != nil {
 		dst.Evidence.StoreInRepo = *src.Evidence.StoreInRepo
 	}
