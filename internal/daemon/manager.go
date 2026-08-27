@@ -29,6 +29,8 @@ type StepFactory func() []pipeline.Step
 
 var recoveredConfigFetchTimeout = 10 * time.Second
 
+var recoveredCITerminalProbeTimeout = 10 * time.Second
+
 var fetchRecoveredRemoteBranch = git.FetchRemoteBranch
 
 // RunManager tracks active pipeline executors and manages run lifecycle.
@@ -76,6 +78,120 @@ type recoveredRunPlan struct {
 	cfg     *config.Config
 	agent   agent.Agent
 	steps   []pipeline.Step
+}
+
+// completeTerminalCIRuns preserves the authoritative remote outcome of a CI
+// monitor if the daemon disappeared between its last poll and the normal
+// executor completion write. It is deliberately narrower than general run
+// resumption: only an otherwise-complete run with exactly one active CI step
+// may be completed, and only after the provider confirms that its PR is
+// terminal. Every other active run continues to the ordinary fail-closed crash
+// recovery path.
+func (m *RunManager) completeTerminalCIRuns(ctx context.Context) {
+	runs, err := m.db.GetActiveRuns()
+	if err != nil {
+		slog.Error("failed to list active runs for terminal CI recovery", "error", err)
+		return
+	}
+	for _, run := range runs {
+		repo, ciStep, workDir, err := m.prepareTerminalCIRecovery(ctx, run)
+		if err != nil {
+			continue
+		}
+
+		probeCtx, cancel := context.WithTimeout(ctx, recoveredCITerminalProbeTimeout)
+		reconciled, reconcileErr := (&steps.CIStep{}).ReconcileApprovalGate(&pipeline.StepContext{
+			Ctx:     probeCtx,
+			Run:     run,
+			Repo:    repo,
+			WorkDir: workDir,
+			DB:      m.db,
+			Log: func(message string) {
+				slog.Info("terminal CI recovery probe", "run_id", run.ID, "message", message)
+			},
+		})
+		cancel()
+		if reconcileErr != nil {
+			slog.Warn("could not reconcile active CI after daemon restart; failing closed", "run_id", run.ID, "error", reconcileErr)
+			continue
+		}
+		if !reconciled {
+			continue
+		}
+
+		durationMS := int64(0)
+		if ciStep.StartedAt != nil {
+			durationMS = time.Since(time.Unix(*ciStep.StartedAt, 0)).Milliseconds()
+		}
+		if err := m.db.CompleteRecoveredCIRun(run.ID, ciStep.ID, durationMS); err != nil {
+			slog.Error("failed to complete terminal CI recovery", "run_id", run.ID, "error", err)
+			continue
+		}
+		run.Status = types.RunCompleted
+		run.Error = nil
+		slog.Info("completed CI run from terminal PR state after daemon restart", "run_id", run.ID)
+	}
+}
+
+func (m *RunManager) prepareTerminalCIRecovery(ctx context.Context, run *db.Run) (*db.Repo, *db.StepResult, string, error) {
+	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince != nil || run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" {
+		return nil, nil, "", fmt.Errorf("run is not an active CI monitor")
+	}
+	stepResults, err := m.db.GetStepsByRun(run.ID)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("get step results: %w", err)
+	}
+	if len(stepResults) != len(types.AllSteps()) {
+		return nil, nil, "", fmt.Errorf("run does not contain the complete pipeline step sequence")
+	}
+	var ciStep *db.StepResult
+	seen := make(map[types.StepName]bool, len(stepResults))
+	for _, stepResult := range stepResults {
+		if seen[stepResult.StepName] {
+			return nil, nil, "", fmt.Errorf("run contains duplicate step %s", stepResult.StepName)
+		}
+		seen[stepResult.StepName] = true
+		if stepResult.StepName == types.StepCI {
+			if stepResult.Status != types.StepStatusRunning || ciStep != nil {
+				return nil, nil, "", fmt.Errorf("CI step is not the single running step")
+			}
+			ciStep = stepResult
+			continue
+		}
+		if stepResult.Status != types.StepStatusCompleted && stepResult.Status != types.StepStatusSkipped {
+			return nil, nil, "", fmt.Errorf("non-CI step %s is not terminal", stepResult.StepName)
+		}
+	}
+	if ciStep == nil {
+		return nil, nil, "", fmt.Errorf("run has no running CI step")
+	}
+	for _, stepName := range types.AllSteps() {
+		if !seen[stepName] {
+			return nil, nil, "", fmt.Errorf("run is missing step %s", stepName)
+		}
+	}
+
+	repo, err := m.db.GetRepo(run.RepoID)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("get repository: %w", err)
+	}
+	if repo == nil {
+		return nil, nil, "", fmt.Errorf("run repository is missing")
+	}
+	workDir := m.paths.WorktreeDir(repo.ID, run.ID)
+	if info, err := os.Stat(workDir); err != nil || !info.IsDir() {
+		return nil, nil, "", fmt.Errorf("worktree is missing")
+	}
+	headSHA, err := git.HeadSHA(ctx, workDir)
+	if err != nil || headSHA != run.HeadSHA {
+		return nil, nil, "", fmt.Errorf("worktree head does not match run head")
+	}
+	gateDir := m.paths.RepoDir(repo.ID)
+	commonDir, err := git.Run(ctx, workDir, "rev-parse", "--git-common-dir")
+	if err != nil || !samePath(resolveGitPath(workDir, commonDir), gateDir) {
+		return nil, nil, "", fmt.Errorf("worktree does not belong to its gate repository")
+	}
+	return repo, ciStep, workDir, nil
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {

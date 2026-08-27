@@ -267,6 +267,7 @@ func writeDaemonPIDFile(path string, record daemonPIDFile) error {
 func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	reapOrphanedServers(p)
 	migrateGateConfigs(context.Background(), p)
+	mgr.completeTerminalCIRuns(context.Background())
 
 	plans := mgr.recoverableParkedRuns(context.Background())
 	preserved := make(map[string]struct{}, len(plans))
