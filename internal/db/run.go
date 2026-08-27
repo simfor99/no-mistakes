@@ -390,6 +390,56 @@ func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
 	return nil
 }
 
+// CompleteRecoveredCIRun records a CI monitor that reached a terminal remote
+// PR state while the daemon was unavailable. The caller must have verified
+// that stepID is the only active CI step for runID before calling this method.
+// Keeping the two updates in one transaction prevents a restart from leaving
+// a completed CI step attached to a still-running run (or the reverse).
+func (d *DB) CompleteRecoveredCIRun(runID, stepID string, durationMS int64) error {
+	if durationMS < 0 {
+		durationMS = 0
+	}
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin recovered CI completion: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(
+		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?,
+			completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, error = NULL
+		 WHERE id = ? AND run_id = ? AND status = ?`,
+		types.StepStatusCompleted, 0, durationMS, now(), now(), "status: completed", stepID, runID, types.StepStatusRunning,
+	)
+	if err != nil {
+		return fmt.Errorf("complete recovered CI step: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("count recovered CI step completion: %w", err)
+	} else if affected != 1 {
+		return fmt.Errorf("complete recovered CI step: expected one running CI step, updated %d", affected)
+	}
+
+	result, err = tx.Exec(
+		`UPDATE runs SET status = ?, error = NULL, awaiting_agent_since = NULL, push_active = 0, updated_at = ?
+		 WHERE id = ? AND status = ?`,
+		types.RunCompleted, now(), runID, types.RunRunning,
+	)
+	if err != nil {
+		return fmt.Errorf("complete recovered CI run: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("count recovered CI run completion: %w", err)
+	} else if affected != 1 {
+		return fmt.Errorf("complete recovered CI run: expected one running run, updated %d", affected)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit recovered CI completion: %w", err)
+	}
+	return nil
+}
+
 // RecoverStaleRuns marks any runs stuck in pending/running status as failed
 // and fails any in-progress steps. This is called at daemon startup to clean
 // up after a previous crash. Returns the number of recovered runs.

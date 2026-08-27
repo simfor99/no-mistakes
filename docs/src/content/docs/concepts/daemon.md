@@ -104,6 +104,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
+- Reconciles an orphaned running CI monitor the same way before failing it: a run with a recorded PR whose other steps are all completed or skipped, whose only running step is CI, and whose worktree still matches the recorded head is re-checked through the provider; a merged or closed PR completes the run and its CI step together in one transaction, while an open, unknown, or unreachable PR fails closed
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed
