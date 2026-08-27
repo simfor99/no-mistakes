@@ -14,11 +14,11 @@ import (
 
 func TestRecoverOnStartupReconcilesOnlyTerminalActiveCI(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		prState   string
-		setPRURL  bool
-		wantRun   types.RunStatus
-		wantStep  types.StepStatus
+		name     string
+		prState  string
+		setPRURL bool
+		wantRun  types.RunStatus
+		wantStep types.StepStatus
 	}{
 		{name: "merged PR completes", prState: "MERGED", setPRURL: true, wantRun: types.RunCompleted, wantStep: types.StepStatusCompleted},
 		{name: "open PR fails closed", prState: "OPEN", setPRURL: true, wantRun: types.RunFailed, wantStep: types.StepStatusFailed},
