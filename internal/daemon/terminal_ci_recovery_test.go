@@ -14,13 +14,15 @@ import (
 
 func TestRecoverOnStartupReconcilesOnlyTerminalActiveCI(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		prState  string
-		wantRun  types.RunStatus
-		wantStep types.StepStatus
+		name      string
+		prState   string
+		setPRURL  bool
+		wantRun   types.RunStatus
+		wantStep  types.StepStatus
 	}{
-		{name: "merged PR completes", prState: "MERGED", wantRun: types.RunCompleted, wantStep: types.StepStatusCompleted},
-		{name: "open PR fails closed", prState: "OPEN", wantRun: types.RunFailed, wantStep: types.StepStatusFailed},
+		{name: "merged PR completes", prState: "MERGED", setPRURL: true, wantRun: types.RunCompleted, wantStep: types.StepStatusCompleted},
+		{name: "open PR fails closed", prState: "OPEN", setPRURL: true, wantRun: types.RunFailed, wantStep: types.StepStatusFailed},
+		{name: "run without PR fails closed even when PR state is terminal", prState: "MERGED", wantRun: types.RunFailed, wantStep: types.StepStatusFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -42,8 +44,10 @@ func TestRecoverOnStartupReconcilesOnlyTerminalActiveCI(t *testing.T) {
 			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 				t.Fatal(err)
 			}
-			if err := database.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/42"); err != nil {
-				t.Fatal(err)
+			if tc.setPRURL {
+				if err := database.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/42"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := database.SetRunPushActive(run.ID, true); err != nil {
 				t.Fatal(err)
