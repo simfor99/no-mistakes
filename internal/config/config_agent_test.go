@@ -350,7 +350,7 @@ func TestResolveAgent_AutoSkipsRovoDevWithoutSubcommand(t *testing.T) {
 
 	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
 		switch bin {
-		case "claude", "codex", "opencode", "pi", "copilot", "cursor-agent", "acpx":
+		case "claude", "codex", "opencode", "pi", "copilot", "cursor-agent", "acpx", "agy":
 			return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
 		case "acli":
 			return "/usr/bin/acli", nil
@@ -739,3 +739,20 @@ func TestResolveAgent_AutoPassesContextToRovoDevProbe(t *testing.T) {
 		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentAuto)
 	}
 }
+
+func TestResolveAgent_AutoDetectsAgy(t *testing.T) {
+	cfg := &Config{Agent: types.AgentAuto}
+	err := cfg.ResolveAgent(context.Background(), func(bin string) (string, error) {
+		if bin == "agy" {
+			return "/usr/local/bin/agy", nil
+		}
+		return "", &exec.Error{Name: bin, Err: exec.ErrNotFound}
+	})
+	if err != nil {
+		t.Fatalf("ResolveAgent() error = %v", err)
+	}
+	if cfg.Agent != types.AgentAgy {
+		t.Errorf("agent = %q, want %q", cfg.Agent, types.AgentAgy)
+	}
+}
+

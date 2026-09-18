@@ -22,20 +22,24 @@ type antigravityAgent struct {
 	extraArgs []string
 }
 
+// Name returns the canonical agent name "agy".
 func (a *antigravityAgent) Name() string { return "agy" }
 
 // SupportsSessionResume reports agy's native durable-session capability:
 // agy assigns a conversation_id to each session and resumes it via --conversation <id>.
 func (a *antigravityAgent) SupportsSessionResume() bool { return true }
 
+// ReportsAgentAttempts indicates that the agy adapter reports attempt counts.
 func (a *antigravityAgent) ReportsAgentAttempts() bool { return true }
 
+// Run executes the agy CLI with retry on transient failures.
 func (a *antigravityAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	return runWithRetry(ctx, "agy", opts, claudeMaxRetries, classifyTransient, nil, func() (*Result, error) {
 		return a.runOnce(ctx, opts)
 	})
 }
 
+// Close releases any resources associated with the agent.
 func (a *antigravityAgent) Close() error { return nil }
 
 func (a *antigravityAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
@@ -97,6 +101,7 @@ func (a *antigravityAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, 
 		res.Resumed = resumeID != ""
 		res.Model = result.model
 		res.ModelProvider = "google"
+		res.SessionUsageCumulative = resumeID != ""
 	}
 	emitAgentExited(opts, "agy", pid, err)
 	return res, err
