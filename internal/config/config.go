@@ -438,7 +438,9 @@ var defaultBinary = map[types.AgentName]string{
 	types.AgentRovoDev:  "acli",
 	types.AgentOpenCode: "opencode",
 	types.AgentPi:       "pi",
-	types.AgentCopilot:  "copilot",
+	types.AgentCopilot:     "copilot",
+	types.AgentAgy:         "agy",
+	types.AgentAntigravity: "agy",
 }
 
 // nativeAgentProbeOrder is the priority order for auto-detecting native agents.
@@ -794,7 +796,9 @@ var agentArgsOverrideAgents = map[string]bool{
 	string(types.AgentRovoDev):  true,
 	string(types.AgentOpenCode): true,
 	string(types.AgentPi):       true,
-	string(types.AgentCopilot):  true,
+	string(types.AgentCopilot):     true,
+	string(types.AgentAgy):         true,
+	string(types.AgentAntigravity): true,
 }
 
 // reservedAgentArgs lists flags that no-mistakes manages internally and that
@@ -847,6 +851,26 @@ var reservedAgentArgs = map[string]map[string]bool{
 		"--output-format": true,
 		"--no-color":      true,
 	},
+	string(types.AgentAgy): {
+		"-p":              true,
+		"--print":         true,
+		"--prompt":        true,
+		"--output-format": true,
+		"--json-schema":   true,
+		"--conversation":  true,
+		"-c":              true,
+		"--continue":      true,
+	},
+	string(types.AgentAntigravity): {
+		"-p":              true,
+		"--print":         true,
+		"--prompt":        true,
+		"--output-format": true,
+		"--json-schema":   true,
+		"--conversation":  true,
+		"-c":              true,
+		"--continue":      true,
+	},
 }
 
 // validateAgentArgsOverride ensures each agent key is a known agent name and
@@ -855,7 +879,7 @@ var reservedAgentArgs = map[string]map[string]bool{
 func validateAgentArgsOverride(override map[string][]string) error {
 	for name, args := range override {
 		if !agentArgsOverrideAgents[name] {
-			return fmt.Errorf("invalid agent name in agent_args_override: %q (valid: claude, codex, rovodev, opencode, pi, copilot)", name)
+			return fmt.Errorf("invalid agent name in agent_args_override: %q (valid: claude, codex, agy, rovodev, opencode, pi, copilot)", name)
 		}
 		reserved := reservedAgentArgs[name]
 		for i, arg := range args {
