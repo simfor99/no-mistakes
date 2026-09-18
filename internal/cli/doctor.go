@@ -162,6 +162,7 @@ func doctorAgentChecks() []doctorAgentCheck {
 	agents := []doctorAgentCheck{
 		{"claude", []string{"claude"}},
 		{"codex", []string{"codex"}},
+		{"agy", []string{"agy"}},
 		{"rovodev", []string{"acli"}},
 		{"opencode", []string{"opencode"}},
 		{"pi", []string{"pi"}},

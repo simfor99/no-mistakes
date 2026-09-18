@@ -140,8 +140,10 @@ const (
 	AgentRovoDev  AgentName = "rovodev"
 	AgentOpenCode AgentName = "opencode"
 	AgentPi       AgentName = "pi"
-	AgentCopilot  AgentName = "copilot"
-	AgentCursor   AgentName = "cursor"
+	AgentCopilot     AgentName = "copilot"
+	AgentCursor      AgentName = "cursor"
+	AgentAgy         AgentName = "agy"
+	AgentAntigravity AgentName = "antigravity"
 )
 
 // ACPAlias describes a first-class agent name that resolves to an ACP target.
